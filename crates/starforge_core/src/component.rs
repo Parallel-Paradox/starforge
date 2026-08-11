@@ -1,0 +1,400 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU16, Ordering};
+
+use thiserror::Error;
+
+use crate::types::TypeId;
+
+pub trait Component: 'static + Send + Sync {}
+
+/// How a component's storage should be dropped.
+#[derive(Debug, Clone, Copy)]
+pub enum ComponentKind {
+    /// No drop glue is needed; the storage can simply be forgotten.
+    Trivial,
+    /// Requires calling `drop_fn` on the raw storage to release it.
+    NonTrivial { drop_fn: unsafe fn(*mut u8) },
+}
+
+/// Metadata describing a registered component: its underlying type and drop behavior.
+#[derive(Debug, Clone)]
+pub struct ComponentMeta {
+    id: TypeId,
+    kind: ComponentKind,
+}
+
+impl PartialEq for ComponentMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for ComponentMeta {}
+
+impl ComponentMeta {
+    /// Builds `ComponentMeta` for component type `T`, deriving drop behavior from `Drop`/needs_drop.
+    pub fn of<T: Component>() -> Self {
+        let kind = if std::mem::needs_drop::<T>() {
+            ComponentKind::NonTrivial { drop_fn: drop_in_place_erased::<T> }
+        } else {
+            ComponentKind::Trivial
+        };
+
+        Self::new(TypeId::of::<T>(), kind)
+    }
+
+    /// Constructs `ComponentMeta` from explicit values.
+    pub fn new(id: TypeId, kind: ComponentKind) -> Self {
+        Self { id, kind }
+    }
+
+    /// Returns the id of the underlying type. Unlike a `TypeKey`, this doesn't require a
+    /// `TypeRegistry` to produce, so components can be described before one is registered.
+    pub fn id(&self) -> &TypeId {
+        &self.id
+    }
+
+    /// Returns the component's drop behavior.
+    pub fn kind(&self) -> &ComponentKind {
+        &self.kind
+    }
+}
+
+/// Type-erased drop glue for `T`, used to destroy components stored as raw bytes.
+unsafe fn drop_in_place_erased<T>(ptr: *mut u8) {
+    // SAFETY: caller guarantees `ptr` points at a valid, initialized `T`
+    unsafe { std::ptr::drop_in_place(ptr as *mut T) };
+}
+
+/// Maps `TypeId`s to stable `ComponentKey`s and their `ComponentMeta`, with generation-based
+/// invalidation of keys whose slot has been unregistered.
+pub struct ComponentRegistry {
+    id_to_key: HashMap<TypeId, ComponentKey>,
+    meta_entries: Vec<(ComponentKey, ComponentMeta)>,
+    retired_keys: Vec<ComponentKey>,
+    instance_id: u16,
+}
+
+/// A stable, generational reference to a component registered in a `ComponentRegistry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComponentKey {
+    /// Slot index into the owning registry's internal storage.
+    pub index: u32,
+    /// Bumped each time the slot is reused, invalidating older keys pointing at it.
+    pub generation: u16,
+    /// Id of the `ComponentRegistry` that issued this key; used to reject foreign keys.
+    pub instance_id: u16,
+}
+
+impl ComponentKey {
+    /// Sentinel index used by `Default`, never produced by a live registration.
+    pub const INVALID_INDEX: u32 = u32::MAX;
+    /// Sentinel generation used by `Default`, never produced by a live registration.
+    pub const TOMB_GENERATION: u16 = u16::MAX;
+    /// Sentinel instance id used by `Default`, never assigned to a real `ComponentRegistry`.
+    pub const INVALID_INSTANCE_ID: u16 = u16::MAX;
+}
+
+impl Default for ComponentKey {
+    /// Produces an invalid key that never resolves against any real `ComponentRegistry`.
+    fn default() -> Self {
+        Self {
+            index: ComponentKey::INVALID_INDEX,
+            generation: ComponentKey::TOMB_GENERATION,
+            instance_id: ComponentKey::INVALID_INSTANCE_ID,
+        }
+    }
+}
+
+impl ComponentKey {
+    /// Returns true if this key is valid.
+    pub fn is_valid(&self) -> bool {
+        self.index != ComponentKey::INVALID_INDEX
+            && self.generation != ComponentKey::TOMB_GENERATION
+            && self.instance_id != ComponentKey::INVALID_INSTANCE_ID
+    }
+}
+
+/// Process-wide counter handing out unique `ComponentRegistry` instance ids.
+static COMPONENT_REGISTRY_INSTANCE_ID: AtomicU16 = AtomicU16::new(0);
+
+impl Default for ComponentRegistry {
+    /// Creates an empty registry with a fresh, process-unique instance id.
+    fn default() -> Self {
+        // wraps on overflow; fine as long as fewer than u16::MAX registries are alive at once
+        let instance_id = COMPONENT_REGISTRY_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(instance_id, "ComponentRegistry created.");
+        Self {
+            id_to_key: HashMap::new(),
+            meta_entries: Vec::new(),
+            retired_keys: Vec::new(),
+            instance_id,
+        }
+    }
+}
+
+impl ComponentRegistry {
+    /// Registers `meta`, returning a stable `ComponentKey`. Re-registering the same `TypeId`
+    /// returns the existing key.
+    pub fn register(&mut self, meta: ComponentMeta) -> ComponentKey {
+        let type_id = *meta.id();
+        if let Some(&existing_key) = self.id_to_key.get(&type_id) {
+            return existing_key;
+        }
+
+        let key = if let Some(retired_key) = self.retired_keys.pop() {
+            self.meta_entries[retired_key.index as usize] = (retired_key, meta);
+            retired_key
+        } else {
+            let key = ComponentKey {
+                index: self.meta_entries.len() as u32,
+                generation: 0,
+                instance_id: self.instance_id,
+            };
+            self.meta_entries.push((key, meta));
+            key
+        };
+        self.id_to_key.insert(type_id, key);
+        tracing::trace!(
+            ?type_id, ?key, meta = ?self.meta_entries[key.index as usize].1,
+            "ComponentRegistry::register created new entry"
+        );
+        key
+    }
+
+    /// Invalidates `key`, retiring its slot for reuse with a bumped generation.
+    /// Returns an error if `key` does not resolve to a live entry in this registry.
+    pub fn unregister(&mut self, key: ComponentKey) -> Result<(), ComponentRegistryError> {
+        let meta = self.key_to_meta(&key)?;
+        let type_id = *meta.id();
+        tracing::trace!(
+            ?type_id, ?key, meta = ?meta,
+            "ComponentRegistry::unregister removing entry"
+        );
+
+        self.id_to_key.remove(&type_id);
+
+        let entry = &mut self.meta_entries[key.index as usize];
+        entry.0.generation = entry.0.generation.wrapping_add(1);
+        self.retired_keys.push(entry.0);
+
+        Ok(())
+    }
+
+    /// Looks up the current `ComponentKey` registered for `type_id`.
+    pub fn id_to_key(&self, type_id: &TypeId) -> Result<&ComponentKey, ComponentRegistryError> {
+        self.id_to_key
+            .get(type_id)
+            .ok_or(ComponentRegistryError::UnknownType { type_id: *type_id })
+    }
+
+    /// Looks up the `ComponentMeta` registered for `type_id`.
+    pub fn id_to_meta(&self, type_id: &TypeId) -> Result<&ComponentMeta, ComponentRegistryError> {
+        let key = self.id_to_key(type_id)?;
+        self.key_to_meta(key)
+    }
+
+    /// Resolves `key` to its `ComponentMeta`, validating that it belongs to this registry
+    /// and that its generation is still current.
+    pub fn key_to_meta(
+        &self,
+        key: &ComponentKey,
+    ) -> Result<&ComponentMeta, ComponentRegistryError> {
+        if key.instance_id != self.instance_id {
+            return Err(ComponentRegistryError::ForeignInstance {
+                expected: self.instance_id,
+                actual: key.instance_id,
+            });
+        }
+        let (stored_key, meta) = self.meta_entries.get(key.index as usize).ok_or(
+            ComponentRegistryError::IndexOutOfBounds {
+                index: key.index,
+                bounds: self.meta_entries.len() as u32,
+            },
+        )?;
+        if stored_key.generation != key.generation {
+            return Err(ComponentRegistryError::GenerationMismatch {
+                expected: stored_key.generation,
+                actual: key.generation,
+            });
+        }
+        Ok(meta)
+    }
+}
+
+/// Errors returned when looking up or unregistering entries in a `ComponentRegistry`.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ComponentRegistryError {
+    /// No component is currently registered for the given type id.
+    #[error("Unknown component type id: {type_id:?}")]
+    UnknownType { type_id: TypeId },
+
+    /// The key's index does not point at a live slot in the registry.
+    #[error("Index out of bounds: index {index}, bounds {bounds}")]
+    IndexOutOfBounds { index: u32, bounds: u32 },
+
+    /// The key's generation is stale; its slot has since been unregistered and possibly reused.
+    #[error("Generation mismatch: expected generation {expected}, actual {actual}")]
+    GenerationMismatch { expected: u16, actual: u16 },
+
+    /// The key was issued by a different `ComponentRegistry` instance.
+    #[error("Foreign registry instance: expected instance id {expected}, actual {actual}")]
+    ForeignInstance { expected: u16, actual: u16 },
+}
+
+#[cfg(test)]
+mod tests {
+    use starforge_core_macro::Component;
+
+    use super::*;
+
+    #[derive(Component)]
+    struct Trivial;
+
+    #[derive(Component)]
+    struct NonTrivial(#[allow(dead_code)] Box<u8>);
+
+    #[test]
+    fn of_detects_trivial_component() {
+        let meta = ComponentMeta::of::<Trivial>();
+        assert!(matches!(meta.kind(), ComponentKind::Trivial));
+    }
+
+    #[test]
+    fn of_detects_non_trivial_component() {
+        let meta = ComponentMeta::of::<NonTrivial>();
+        assert!(matches!(meta.kind(), ComponentKind::NonTrivial { .. }));
+    }
+
+    #[test]
+    fn component_meta_equality_ignores_kind() {
+        let type_id = TypeId::of_script(1);
+        let a = ComponentMeta::new(type_id, ComponentKind::Trivial);
+        let b = ComponentMeta::new(
+            type_id,
+            ComponentKind::NonTrivial { drop_fn: drop_in_place_erased::<u8> },
+        );
+
+        // identity is defined by `id` alone; `kind` is a derived attribute of it
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn register_is_idempotent_for_same_type() {
+        let mut registry = ComponentRegistry::default();
+        let key1 = registry.register(ComponentMeta::of::<Trivial>());
+        let key2 = registry.register(ComponentMeta::of::<Trivial>());
+
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn register_keeps_existing_metadata_on_reregister() {
+        let mut registry = ComponentRegistry::default();
+        let type_id = TypeId::of_script(2);
+        registry.register(ComponentMeta::new(type_id, ComponentKind::Trivial));
+        registry.register(ComponentMeta::new(
+            type_id,
+            ComponentKind::NonTrivial { drop_fn: drop_in_place_erased::<u8> },
+        ));
+
+        // re-registering doesn't overwrite metadata, unlike `TypeRegistry::register`
+        let meta = registry.id_to_meta(&type_id).unwrap();
+        assert!(matches!(meta.kind(), ComponentKind::Trivial));
+    }
+
+    #[test]
+    fn unregister_invalidates_the_key() {
+        let mut registry = ComponentRegistry::default();
+        let type_id = TypeId::of::<Trivial>();
+        let key = registry.register(ComponentMeta::of::<Trivial>());
+
+        registry.unregister(key).unwrap();
+
+        assert!(registry.id_to_key(&type_id).is_err());
+        assert_eq!(
+            registry.id_to_meta(&type_id),
+            Err(ComponentRegistryError::UnknownType { type_id })
+        );
+        assert_eq!(
+            registry.key_to_meta(&key),
+            Err(ComponentRegistryError::GenerationMismatch {
+                expected: key.generation.wrapping_add(1),
+                actual: key.generation,
+            })
+        );
+    }
+
+    #[test]
+    fn register_reuses_retired_slot_with_bumped_generation() {
+        let mut registry = ComponentRegistry::default();
+        let key_a = registry.register(ComponentMeta::of::<Trivial>());
+        registry.unregister(key_a).unwrap();
+
+        let key_b = registry.register(ComponentMeta::of::<NonTrivial>());
+
+        assert_eq!(key_b.index, key_a.index);
+        assert_eq!(key_b.generation, key_a.generation.wrapping_add(1));
+        assert_eq!(key_b.instance_id, key_a.instance_id);
+    }
+
+    #[test]
+    fn unregister_unknown_key_returns_error() {
+        let mut registry = ComponentRegistry::default();
+        let bogus = ComponentKey { index: 0, generation: 0, instance_id: registry.instance_id };
+
+        assert_eq!(
+            registry.unregister(bogus),
+            Err(ComponentRegistryError::IndexOutOfBounds { index: 0, bounds: 0 })
+        );
+    }
+
+    #[test]
+    fn key_to_meta_out_of_bounds_index_is_rejected() {
+        let mut registry = ComponentRegistry::default();
+        let key = registry.register(ComponentMeta::of::<Trivial>());
+        let bogus = ComponentKey { index: key.index + 1, ..key };
+
+        assert_eq!(
+            registry.key_to_meta(&bogus),
+            Err(ComponentRegistryError::IndexOutOfBounds { index: bogus.index, bounds: 1 })
+        );
+    }
+
+    #[test]
+    fn key_from_another_registry_is_rejected() {
+        let mut registry_a = ComponentRegistry::default();
+        let registry_b = ComponentRegistry::default();
+        let key = registry_a.register(ComponentMeta::of::<Trivial>());
+
+        assert_eq!(
+            registry_b.key_to_meta(&key),
+            Err(ComponentRegistryError::ForeignInstance {
+                expected: registry_b.instance_id,
+                actual: key.instance_id,
+            })
+        );
+    }
+
+    #[test]
+    fn id_to_meta_of_unregistered_id_is_unknown_type_error() {
+        let registry = ComponentRegistry::default();
+        let type_id = TypeId::of::<Trivial>();
+
+        assert_eq!(
+            registry.id_to_meta(&type_id),
+            Err(ComponentRegistryError::UnknownType { type_id })
+        );
+    }
+
+    #[test]
+    fn id_to_key_of_unregistered_id_is_unknown_type_error() {
+        let registry = ComponentRegistry::default();
+        let type_id = TypeId::of::<Trivial>();
+
+        assert_eq!(
+            registry.id_to_key(&type_id),
+            Err(ComponentRegistryError::UnknownType { type_id })
+        );
+    }
+}

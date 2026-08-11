@@ -1,0 +1,9 @@
+[package]
+name = "starforge_macro_util"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+syn = "3.0"
+quote = "1.0"
+toml = "1.1"

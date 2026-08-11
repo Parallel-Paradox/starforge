@@ -4,23 +4,29 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU16, Ordering};
 use thiserror::Error;
 
+/// Uniquely identifies a native Rust type or a script-defined type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeId {
+    /// A type known to the Rust type system.
     Native(StdTypeId),
+    /// A type defined by a script, identified by an opaque script-assigned id.
     Script(usize),
 }
 
 impl TypeId {
+    /// Returns the `TypeId` for a native Rust type `T`.
     pub fn of<T: Any + 'static>() -> Self {
         let std_type_id = StdTypeId::of::<T>();
         Self::Native(std_type_id)
     }
 
+    /// Returns the `TypeId` for a script-defined type identified by `script_id`.
     pub fn of_script(script_id: usize) -> Self {
         Self::Script(script_id)
     }
 }
 
+/// Metadata describing a registered type: its identity, size, alignment, and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeMeta {
     id: TypeId,
@@ -30,6 +36,7 @@ pub struct TypeMeta {
 }
 
 impl TypeMeta {
+    /// Builds `TypeMeta` for a native Rust type `T` from `size_of`/`align_of`/`type_name`.
     pub fn of<T: Any + 'static>() -> Self {
         Self::new(
             TypeId::of::<T>(),
@@ -39,6 +46,8 @@ impl TypeMeta {
         )
     }
 
+    /// Constructs `TypeMeta` from explicit values. Zero-sized types (size 0) are allowed;
+    /// `size`/`align` invariants are otherwise checked via `debug_assert!` in debug builds.
     pub fn new(id: TypeId, size: usize, align: usize, name: &'static str) -> Self {
         // zero-sized types (e.g. marker structs) are allowed and have size 0
         debug_assert!(size == 0 || size >= align, "Type size must be ge to alignment.");
@@ -49,23 +58,29 @@ impl TypeMeta {
         Self { id, size, align, name }
     }
 
+    /// Returns the type's identity.
     pub fn id(&self) -> &TypeId {
         &self.id
     }
 
+    /// Returns the type's size in bytes (0 for zero-sized types).
     pub fn size(&self) -> usize {
         self.size
     }
 
+    /// Returns the type's minimum alignment in bytes.
     pub fn align(&self) -> usize {
         self.align
     }
 
+    /// Returns the type's display name.
     pub fn name(&self) -> &'static str {
         self.name
     }
 }
 
+/// Maps `TypeId`s to stable `TypeKey`s and their `TypeMeta`, with generation-based
+/// invalidation of keys whose slot has been unregistered.
 pub struct TypeRegistry {
     id_to_key: HashMap<TypeId, TypeKey>,
     meta_entries: Vec<(TypeKey, TypeMeta)>,
@@ -73,20 +88,28 @@ pub struct TypeRegistry {
     instance_id: u16,
 }
 
+/// A stable, generational reference to a type registered in a `TypeRegistry`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeKey {
+    /// Slot index into the owning registry's internal storage.
     pub index: u32,
+    /// Bumped each time the slot is reused, invalidating older keys pointing at it.
     pub generation: u16,
+    /// Id of the `TypeRegistry` that issued this key; used to reject foreign keys.
     pub instance_id: u16,
 }
 
 impl TypeKey {
+    /// Sentinel index used by `Default`, never produced by a live registration.
     pub const INVALID_INDEX: u32 = u32::MAX;
+    /// Sentinel generation used by `Default`, never produced by a live registration.
     pub const TOMB_GENERATION: u16 = u16::MAX;
+    /// Sentinel instance id used by `Default`, never assigned to a real `TypeRegistry`.
     pub const INVALID_INSTANCE_ID: u16 = u16::MAX;
 }
 
 impl Default for TypeKey {
+    /// Produces an invalid key that never resolves against any real `TypeRegistry`.
     fn default() -> Self {
         Self {
             index: TypeKey::INVALID_INDEX,
@@ -96,10 +119,20 @@ impl Default for TypeKey {
     }
 }
 
+impl TypeKey {
+    /// Returns true if this key is valid.
+    pub fn is_valid(&self) -> bool {
+        self.index != TypeKey::INVALID_INDEX
+            && self.generation != TypeKey::TOMB_GENERATION
+            && self.instance_id != TypeKey::INVALID_INSTANCE_ID
+    }
+}
+
 /// Process-wide counter handing out unique `TypeRegistry` instance ids.
 static TYPE_REGISTRY_INSTANCE_ID: AtomicU16 = AtomicU16::new(0);
 
 impl Default for TypeRegistry {
+    /// Creates an empty registry with a fresh, process-unique instance id.
     fn default() -> Self {
         // wraps on overflow; fine as long as fewer than u16::MAX registries are alive at once
         let instance_id = TYPE_REGISTRY_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
@@ -114,6 +147,10 @@ impl Default for TypeRegistry {
 }
 
 impl TypeRegistry {
+    /// Registers `meta`, returning a stable `TypeKey`. Re-registering the same `TypeId`
+    /// is idempotent: it returns the existing key and overwrites its metadata. The two
+    /// registrations are expected to carry identical metadata, which is checked via
+    /// `debug_assert_eq!` in debug builds and logged with `tracing::warn!` otherwise.
     pub fn register(&mut self, meta: TypeMeta) -> TypeKey {
         let id = *meta.id();
         if let Some(&existing_key) = self.id_to_key.get(&id) {
@@ -148,10 +185,13 @@ impl TypeRegistry {
         self.id_to_key.insert(id, key);
         tracing::trace!(
             ?id, ?key, meta = ?self.meta_entries[key.index as usize].1,
-            "TypeRegistry::register created new entry");
+            "TypeRegistry::register created new entry"
+        );
         key
     }
 
+    /// Invalidates `key`, retiring its slot for reuse with a bumped generation.
+    /// Returns an error if `key` does not resolve to a live entry in this registry.
     pub fn unregister(&mut self, key: TypeKey) -> Result<(), TypeRegistryError> {
         let meta = self.key_to_meta(&key)?;
         let id = *meta.id();
@@ -166,17 +206,21 @@ impl TypeRegistry {
         Ok(())
     }
 
-    pub fn id_to_key(&self, id: &TypeId) -> Option<&TypeKey> {
-        self.id_to_key.get(id)
+    /// Looks up the current `TypeKey` registered for `id`.
+    pub fn id_to_key(&self, id: &TypeId) -> Result<&TypeKey, TypeRegistryError> {
+        self.id_to_key
+            .get(id)
+            .ok_or(TypeRegistryError::UnknownType { id: *id })
     }
 
+    /// Looks up the `TypeMeta` registered for `id`.
     pub fn id_to_meta(&self, id: &TypeId) -> Result<&TypeMeta, TypeRegistryError> {
-        let key = self
-            .id_to_key(id)
-            .ok_or(TypeRegistryError::UnknownType { id: *id })?;
+        let key = self.id_to_key(id)?;
         self.key_to_meta(key)
     }
 
+    /// Resolves `key` to its `TypeMeta`, validating that it belongs to this registry
+    /// and that its generation is still current.
     pub fn key_to_meta(&self, key: &TypeKey) -> Result<&TypeMeta, TypeRegistryError> {
         if key.instance_id != self.instance_id {
             return Err(TypeRegistryError::ForeignInstance {
@@ -200,17 +244,22 @@ impl TypeRegistry {
     }
 }
 
+/// Errors returned when looking up or unregistering entries in a `TypeRegistry`.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TypeRegistryError {
+    /// No type is currently registered for the given id.
     #[error("Unknown type id: {id:?}")]
     UnknownType { id: TypeId },
 
+    /// The key's index does not point at a live slot in the registry.
     #[error("Index out of bounds: index {index}, bounds {bounds}")]
     IndexOutOfBounds { index: u32, bounds: u32 },
 
+    /// The key's generation is stale; its slot has since been unregistered and possibly reused.
     #[error("Generation mismatch: expected generation {expected}, actual {actual}")]
     GenerationMismatch { expected: u16, actual: u16 },
 
+    /// The key was issued by a different `TypeRegistry` instance.
     #[error("Foreign registry instance: expected instance id {expected}, actual {actual}")]
     ForeignInstance { expected: u16, actual: u16 },
 }
@@ -274,7 +323,7 @@ mod tests {
 
         registry.unregister(key).unwrap();
 
-        assert!(registry.id_to_key(&id).is_none());
+        assert!(registry.id_to_key(&id).is_err());
         assert_eq!(registry.id_to_meta(&id), Err(TypeRegistryError::UnknownType { id }));
         assert_eq!(
             registry.key_to_meta(&key),

@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+starforge_core_macro = { path = "./macro" }
+
 tracing = "0.1"
 thiserror = "2.0"

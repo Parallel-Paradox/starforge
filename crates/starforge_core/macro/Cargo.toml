@@ -1,0 +1,12 @@
+[package]
+name = "starforge_core_macro"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "3.0"
+quote = "1.0"
+starforge_macro_util = { path = "../../starforge_macro_util" }
