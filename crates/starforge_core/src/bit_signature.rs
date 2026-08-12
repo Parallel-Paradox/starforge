@@ -1,4 +1,5 @@
 use core::fmt;
+use core::hash::{Hash, Hasher};
 
 /// A growable bitset used to identify a set of component types (e.g. an archetype signature).
 #[derive(Clone, Eq)]
@@ -153,6 +154,21 @@ impl PartialEq for BitSignature {
         self.0[..min_len] == other.0[..min_len]
             && self.0[min_len..].iter().all(|word| *word == 0)
             && other.0[min_len..].iter().all(|word| *word == 0)
+    }
+}
+
+impl Hash for BitSignature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash only up to the last non-zero word so that equal signatures (which
+        // may differ in trailing zero words) always hash identically.
+        let end = self
+            .0
+            .iter()
+            .rposition(|word| *word != 0)
+            .map_or(0, |i| i + 1);
+        for word in &self.0[..end] {
+            word.hash(state);
+        }
     }
 }
 
@@ -459,5 +475,50 @@ mod tests {
         assert!(a.test(7));
         assert!(!a.test(8));
         assert!(b.test(8));
+    }
+
+    #[test]
+    fn hash_is_consistent_with_eq() {
+        use std::hash::{DefaultHasher, Hasher};
+
+        let hash = |sig: &BitSignature| {
+            let mut hasher = DefaultHasher::new();
+            sig.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        let mut short = BitSignature::default();
+        short.set(3);
+        let mut long = BitSignature::default();
+        long.set(3);
+        long.reserve(200); // trailing zero words
+        assert_eq!(short, long);
+        assert_eq!(hash(&short), hash(&long));
+
+        let mut other = BitSignature::default();
+        other.set(4);
+        assert_ne!(hash(&short), hash(&other));
+
+        // Empty signatures of different lengths must hash the same too.
+        let mut empty_long = BitSignature::default();
+        empty_long.reserve(1000);
+        assert_eq!(BitSignature::default(), empty_long);
+        assert_eq!(hash(&BitSignature::default()), hash(&empty_long));
+    }
+
+    #[test]
+    fn usable_as_hashmap_key() {
+        let mut map = std::collections::HashMap::new();
+
+        let mut a = BitSignature::default();
+        a.set(1);
+        a.set(70);
+        let mut b = BitSignature::default();
+        b.set(70);
+        b.set(1);
+        b.reserve(500); // trailing zero words, equal to `a`
+
+        map.insert(a, "found");
+        assert_eq!(map.get(&b), Some(&"found"));
     }
 }
