@@ -32,7 +32,7 @@ impl PartialEq for ComponentMeta {
 impl Eq for ComponentMeta {}
 
 impl ComponentMeta {
-    /// Builds `ComponentMeta` for component type `T`, deriving drop behavior from `Drop`/needs_drop.
+    /// Builds `ComponentMeta` for component type `T`, deriving drop behavior from `Drop`.
     pub fn of<T: Component>() -> Self {
         let kind = if std::mem::needs_drop::<T>() {
             ComponentKind::NonTrivial { drop_fn: drop_in_place_erased::<T> }

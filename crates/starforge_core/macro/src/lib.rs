@@ -1,3 +1,7 @@
+// MSVC's linker prints an informational "Creating library ... and object ..."
+// line to stdout when building this proc-macro's dll; silence the resulting lint.
+#![allow(linker_messages)]
+
 use proc_macro::TokenStream;
 use quote::quote;
 use starforge_macro_util::manifest::Manifest;
