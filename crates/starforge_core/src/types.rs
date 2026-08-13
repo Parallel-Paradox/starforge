@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::any::TypeId as StdTypeId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 
 /// Uniquely identifies a native Rust type or a script-defined type.
@@ -85,27 +85,27 @@ pub struct TypeRegistry {
     id_to_key: HashMap<TypeId, TypeKey>,
     meta_entries: Vec<(TypeKey, TypeMeta)>,
     retired_keys: Vec<TypeKey>,
-    instance_id: u16,
+    instance_id: u32,
 }
 
 /// A stable, generational reference to a type registered in a `TypeRegistry`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeKey {
     /// Slot index into the owning registry's internal storage.
-    pub index: u32,
+    pub index: usize,
     /// Bumped each time the slot is reused, invalidating older keys pointing at it.
-    pub generation: u16,
+    pub generation: u32,
     /// Id of the `TypeRegistry` that issued this key; used to reject foreign keys.
-    pub instance_id: u16,
+    pub instance_id: u32,
 }
 
 impl TypeKey {
     /// Sentinel index used by `Default`, never produced by a live registration.
-    pub const INVALID_INDEX: u32 = u32::MAX;
+    pub const INVALID_INDEX: usize = usize::MAX;
     /// Sentinel generation used by `Default`, never produced by a live registration.
-    pub const TOMB_GENERATION: u16 = u16::MAX;
+    pub const TOMB_GENERATION: u32 = u32::MAX;
     /// Sentinel instance id used by `Default`, never assigned to a real `TypeRegistry`.
-    pub const INVALID_INSTANCE_ID: u16 = u16::MAX;
+    pub const INVALID_INSTANCE_ID: u32 = u32::MAX;
 }
 
 impl Default for TypeKey {
@@ -129,12 +129,12 @@ impl TypeKey {
 }
 
 /// Process-wide counter handing out unique `TypeRegistry` instance ids.
-static TYPE_REGISTRY_INSTANCE_ID: AtomicU16 = AtomicU16::new(0);
+static TYPE_REGISTRY_INSTANCE_ID: AtomicU32 = AtomicU32::new(0);
 
 impl Default for TypeRegistry {
     /// Creates an empty registry with a fresh, process-unique instance id.
     fn default() -> Self {
-        // wraps on overflow; fine as long as fewer than u16::MAX registries are alive at once
+        // wraps on overflow; fine as long as fewer than u32::MAX registries are alive at once
         let instance_id = TYPE_REGISTRY_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
         tracing::trace!(instance_id, "TypeRegistry created.");
         Self {
@@ -154,7 +154,7 @@ impl TypeRegistry {
     pub fn register(&mut self, meta: TypeMeta) -> TypeKey {
         let id = *meta.id();
         if let Some(&existing_key) = self.id_to_key.get(&id) {
-            let stored_meta = &mut self.meta_entries[existing_key.index as usize].1;
+            let stored_meta = &mut self.meta_entries[existing_key.index].1;
             debug_assert_eq!(
                 *stored_meta, meta,
                 "TypeMeta mismatch: {id:?} was already registered with different metadata"
@@ -171,11 +171,11 @@ impl TypeRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.meta_entries[retired_key.index as usize] = (retired_key, meta);
+            self.meta_entries[retired_key.index] = (retired_key, meta);
             retired_key
         } else {
             let key = TypeKey {
-                index: self.meta_entries.len() as u32,
+                index: self.meta_entries.len(),
                 generation: 0,
                 instance_id: self.instance_id,
             };
@@ -184,7 +184,7 @@ impl TypeRegistry {
         };
         self.id_to_key.insert(id, key);
         tracing::trace!(
-            ?id, ?key, meta = ?self.meta_entries[key.index as usize].1,
+            ?id, ?key, meta = ?self.meta_entries[key.index].1,
             "TypeRegistry::register created new entry"
         );
         key
@@ -199,7 +199,7 @@ impl TypeRegistry {
 
         self.id_to_key.remove(&id);
 
-        let entry = &mut self.meta_entries[key.index as usize];
+        let entry = &mut self.meta_entries[key.index];
         entry.0.generation = entry.0.generation.wrapping_add(1);
         self.retired_keys.push(entry.0);
 
@@ -228,12 +228,13 @@ impl TypeRegistry {
                 actual: key.instance_id,
             });
         }
-        let (stored_key, meta) = self.meta_entries.get(key.index as usize).ok_or(
-            TypeRegistryError::IndexOutOfBounds {
-                index: key.index,
-                bounds: self.meta_entries.len() as u32,
-            },
-        )?;
+        let (stored_key, meta) =
+            self.meta_entries
+                .get(key.index)
+                .ok_or(TypeRegistryError::IndexOutOfBounds {
+                    index: key.index,
+                    bounds: self.meta_entries.len(),
+                })?;
         if stored_key.generation != key.generation {
             return Err(TypeRegistryError::GenerationMismatch {
                 expected: stored_key.generation,
@@ -253,15 +254,15 @@ pub enum TypeRegistryError {
 
     /// The key's index does not point at a live slot in the registry.
     #[error("Index out of bounds: index {index}, bounds {bounds}")]
-    IndexOutOfBounds { index: u32, bounds: u32 },
+    IndexOutOfBounds { index: usize, bounds: usize },
 
     /// The key's generation is stale; its slot has since been unregistered and possibly reused.
     #[error("Generation mismatch: expected generation {expected}, actual {actual}")]
-    GenerationMismatch { expected: u16, actual: u16 },
+    GenerationMismatch { expected: u32, actual: u32 },
 
     /// The key was issued by a different `TypeRegistry` instance.
     #[error("Foreign registry instance: expected instance id {expected}, actual {actual}")]
-    ForeignInstance { expected: u16, actual: u16 },
+    ForeignInstance { expected: u32, actual: u32 },
 }
 
 #[cfg(test)]
@@ -340,7 +341,7 @@ mod tests {
         let key_a = registry.register(TypeMeta::of::<u8>());
         registry.unregister(key_a).unwrap();
 
-        let key_b = registry.register(TypeMeta::of::<u16>());
+        let key_b = registry.register(TypeMeta::of::<u32>());
 
         assert_eq!(key_b.index, key_a.index);
         assert_eq!(key_b.generation, key_a.generation.wrapping_add(1));

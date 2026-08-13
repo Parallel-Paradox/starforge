@@ -47,7 +47,7 @@ impl ArchetypeMeta {
         comp_registry: &ComponentRegistry,
     ) -> Result<Self, ArchetypeMetaError> {
         // Resolve each column to its layout key and verify its type/component keys agree.
-        let mut keyed: Vec<((Reverse<usize>, Reverse<usize>, u32), TypeId, ColumnEntry)> =
+        let mut keyed: Vec<((Reverse<usize>, Reverse<usize>, usize), TypeId, ColumnEntry)> =
             Vec::with_capacity(columns.len());
         for entry in columns {
             let type_meta = type_registry.key_to_meta(&entry.type_key)?;
@@ -83,11 +83,11 @@ impl ArchetypeMeta {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ArchetypeMetaError {
     /// A column's `TypeKey` does not resolve in the `TypeRegistry`.
-    #[error("column type key does not resolve: {0}")]
+    #[error("column type key does not resolve\n -> {0}")]
     Type(#[from] TypeRegistryError),
 
     /// A column's `ComponentKey` does not resolve in the `ComponentRegistry`.
-    #[error("column component key does not resolve: {0}")]
+    #[error("column component key does not resolve\n -> {0}")]
     Component(#[from] ComponentRegistryError),
 
     /// A column's type key and component key resolve to different underlying types.
