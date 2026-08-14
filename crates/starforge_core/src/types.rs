@@ -21,7 +21,7 @@ impl TypeId {
     }
 
     /// Returns the `TypeId` for a script-defined type identified by `script_id`.
-    pub fn of_script(script_id: usize) -> Self {
+    pub const fn of_script(script_id: usize) -> Self {
         Self::Script(script_id)
     }
 }
@@ -29,10 +29,10 @@ impl TypeId {
 /// Metadata describing a registered type: its identity, size, alignment, and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeMeta {
-    id: TypeId,
-    size: usize,
-    align: usize,
-    name: &'static str,
+    pub id: TypeId,
+    pub size: usize,
+    pub align: usize,
+    pub name: &'static str,
 }
 
 impl TypeMeta {
@@ -48,7 +48,7 @@ impl TypeMeta {
 
     /// Constructs `TypeMeta` from explicit values. Zero-sized types (size 0) are allowed;
     /// `size`/`align` invariants are otherwise checked via `debug_assert!` in debug builds.
-    pub fn new(id: TypeId, size: usize, align: usize, name: &'static str) -> Self {
+    pub const fn new(id: TypeId, size: usize, align: usize, name: &'static str) -> Self {
         // zero-sized types (e.g. marker structs) are allowed and have size 0
         debug_assert!(size == 0 || size >= align, "Type size must be ge to alignment.");
         debug_assert!(size % align == 0, "Type size must be a multiple of alignment.");
@@ -56,26 +56,6 @@ impl TypeMeta {
         debug_assert!(!name.is_empty(), "Type name must not be empty.");
 
         Self { id, size, align, name }
-    }
-
-    /// Returns the type's identity.
-    pub fn id(&self) -> &TypeId {
-        &self.id
-    }
-
-    /// Returns the type's size in bytes (0 for zero-sized types).
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    /// Returns the type's minimum alignment in bytes.
-    pub fn align(&self) -> usize {
-        self.align
-    }
-
-    /// Returns the type's display name.
-    pub fn name(&self) -> &'static str {
-        self.name
     }
 }
 
@@ -152,7 +132,7 @@ impl TypeRegistry {
     /// registrations are expected to carry identical metadata, which is checked via
     /// `debug_assert_eq!` in debug builds and logged with `tracing::warn!` otherwise.
     pub fn register(&mut self, meta: TypeMeta) -> TypeKey {
-        let id = *meta.id();
+        let id = meta.id;
         if let Some(&existing_key) = self.id_to_key.get(&id) {
             let stored_meta = &mut self.meta_entries[existing_key.index].1;
             debug_assert_eq!(
@@ -194,7 +174,7 @@ impl TypeRegistry {
     /// Returns an error if `key` does not resolve to a live entry in this registry.
     pub fn unregister(&mut self, key: TypeKey) -> Result<(), TypeRegistryError> {
         let meta = self.key_to_meta(&key)?;
-        let id = *meta.id();
+        let id = meta.id;
         tracing::trace!(?id, ?key, meta = ?meta, "TypeRegistry::unregister removing entry");
 
         self.id_to_key.remove(&id);
@@ -273,11 +253,11 @@ mod tests {
     fn register_allows_zero_sized_types() {
         let mut registry = TypeRegistry::default();
         let meta = TypeMeta::of::<()>();
-        assert_eq!(meta.size(), 0);
+        assert_eq!(meta.size, 0);
 
         let key = registry.register(meta);
 
-        assert_eq!(registry.key_to_meta(&key).unwrap().size(), 0);
+        assert_eq!(registry.key_to_meta(&key).unwrap().size, 0);
     }
 
     #[test]
@@ -288,7 +268,7 @@ mod tests {
 
         assert_eq!(key1, key2);
         assert_eq!(
-            registry.id_to_meta(&TypeId::of::<u8>()).unwrap().name(),
+            registry.id_to_meta(&TypeId::of::<u8>()).unwrap().name,
             std::any::type_name::<u8>()
         );
     }
@@ -313,7 +293,7 @@ mod tests {
         let key2 = registry.register(TypeMeta::new(id, 8, 8, "v2"));
 
         assert_eq!(key1, key2);
-        assert_eq!(registry.id_to_meta(&id).unwrap().name(), "v2");
+        assert_eq!(registry.id_to_meta(&id).unwrap().name, "v2");
     }
 
     #[test]

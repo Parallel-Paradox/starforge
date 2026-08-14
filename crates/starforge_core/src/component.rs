@@ -19,8 +19,8 @@ pub enum ComponentKind {
 /// Metadata describing a registered component: its underlying type and drop behavior.
 #[derive(Debug, Clone)]
 pub struct ComponentMeta {
-    id: TypeId,
-    kind: ComponentKind,
+    pub id: TypeId,
+    pub kind: ComponentKind,
 }
 
 impl PartialEq for ComponentMeta {
@@ -46,17 +46,6 @@ impl ComponentMeta {
     /// Constructs `ComponentMeta` from explicit values.
     pub fn new(id: TypeId, kind: ComponentKind) -> Self {
         Self { id, kind }
-    }
-
-    /// Returns the id of the underlying type. Unlike a `TypeKey`, this doesn't require a
-    /// `TypeRegistry` to produce, so components can be described before one is registered.
-    pub fn id(&self) -> &TypeId {
-        &self.id
-    }
-
-    /// Returns the component's drop behavior.
-    pub fn kind(&self) -> &ComponentKind {
-        &self.kind
     }
 }
 
@@ -137,7 +126,7 @@ impl ComponentRegistry {
     /// Registers `meta`, returning a stable `ComponentKey`. Re-registering the same `TypeId`
     /// returns the existing key.
     pub fn register(&mut self, meta: ComponentMeta) -> ComponentKey {
-        let type_id = *meta.id();
+        let type_id = meta.id;
         if let Some(&existing_key) = self.id_to_key.get(&type_id) {
             return existing_key;
         }
@@ -166,7 +155,7 @@ impl ComponentRegistry {
     /// Returns an error if `key` does not resolve to a live entry in this registry.
     pub fn unregister(&mut self, key: ComponentKey) -> Result<(), ComponentRegistryError> {
         let meta = self.key_to_meta(&key)?;
-        let type_id = *meta.id();
+        let type_id = meta.id;
         tracing::trace!(
             ?type_id, ?key, meta = ?meta,
             "ComponentRegistry::unregister removing entry"
@@ -258,13 +247,13 @@ mod tests {
     #[test]
     fn of_detects_trivial_component() {
         let meta = ComponentMeta::of::<Trivial>();
-        assert!(matches!(meta.kind(), ComponentKind::Trivial));
+        assert!(matches!(meta.kind, ComponentKind::Trivial));
     }
 
     #[test]
     fn of_detects_non_trivial_component() {
         let meta = ComponentMeta::of::<NonTrivial>();
-        assert!(matches!(meta.kind(), ComponentKind::NonTrivial { .. }));
+        assert!(matches!(meta.kind, ComponentKind::NonTrivial { .. }));
     }
 
     #[test]
@@ -301,7 +290,7 @@ mod tests {
 
         // re-registering doesn't overwrite metadata, unlike `TypeRegistry::register`
         let meta = registry.id_to_meta(&type_id).unwrap();
-        assert!(matches!(meta.kind(), ComponentKind::Trivial));
+        assert!(matches!(meta.kind, ComponentKind::Trivial));
     }
 
     #[test]
