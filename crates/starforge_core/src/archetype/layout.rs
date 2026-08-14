@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::{archetype::meta::ArchetypeMeta, entity::EntityKey};
+use crate::{archetype::ArchetypeMeta, entity::EntityKey};
 
 /// The byte layout of an archetype's chunk buffer.
 /// The buffer is a SOA (structure-of-arrays), the entity key array is placed at the tail.
