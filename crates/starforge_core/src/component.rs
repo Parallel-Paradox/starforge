@@ -234,7 +234,7 @@ pub enum ComponentRegistryError {
 
 #[cfg(test)]
 mod tests {
-    use starforge_core_macro::Component;
+    use crate::macros::Component;
 
     use super::*;
 
