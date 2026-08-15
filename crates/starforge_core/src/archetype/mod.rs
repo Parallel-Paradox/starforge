@@ -4,4 +4,4 @@ mod meta;
 
 pub use chunk::ArchetypeChunk;
 pub use layout::ArchetypeChunkLayout;
-pub use meta::{ArchetypeMeta, ArchetypeMetaError};
+pub use meta::{ArchetypeMeta, ArchetypeMetaError, ColumnEntry};
