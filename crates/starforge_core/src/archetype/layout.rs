@@ -161,9 +161,9 @@ mod tests {
         types::{TypeId, TypeMeta, TypeRegistry},
     };
 
-    /// Script columns registered by [`registries`], in registration order (component key
-    /// index 0 and 1). `ArchetypeMeta::new` reorders them by alignment descending, so column
-    /// 0 (align 8) comes first and column 1 (align 4) second.
+    /// Script columns registered by [`TestContext::mock`], in registration order (component
+    /// key index 0 and 1). `ArchetypeMeta::new` reorders them by alignment descending, so
+    /// column 0 (align 8) comes first and column 1 (align 4) second.
     const COLUMNS: [TypeMeta; 2] = [
         TypeMeta::new(TypeId::of_script(1), 8, 8, "column_0"),
         TypeMeta::new(TypeId::of_script(2), 4, 4, "column_1"),
@@ -172,43 +172,48 @@ mod tests {
     const ENTITY_KEY_SIZE: usize = std::mem::size_of::<EntityKey>();
     const ENTITY_KEY_ALIGN: usize = std::mem::align_of::<EntityKey>();
 
-    fn registries() -> (TypeRegistry, ComponentRegistry) {
-        let mut type_reg = TypeRegistry::default();
-        let mut comp_reg = ComponentRegistry::default();
+    struct TestContext {
+        type_reg: TypeRegistry,
+        comp_reg: ComponentRegistry,
+    }
 
-        for column in &COLUMNS {
-            type_reg.register(column.clone());
-            comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
+    impl TestContext {
+        /// Builds a context holding the [`COLUMNS`] registrations, in registration order.
+        pub fn mock() -> Self {
+            let mut type_reg = TypeRegistry::default();
+            let mut comp_reg = ComponentRegistry::default();
+
+            for column in &COLUMNS {
+                type_reg.register(column.clone());
+                comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
+            }
+
+            Self { type_reg, comp_reg }
         }
 
-        (type_reg, comp_reg)
-    }
+        pub fn column(&self, id: TypeId) -> ColumnEntry {
+            let type_key = *self.type_reg.id_to_key(&id).unwrap();
+            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
+            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap().clone();
+            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap().clone();
+            ColumnEntry { type_key, type_meta, comp_key, comp_meta }
+        }
 
-    fn column(type_reg: &TypeRegistry, comp_reg: &ComponentRegistry, id: TypeId) -> ColumnEntry {
-        let type_key = *type_reg.id_to_key(&id).unwrap();
-        let comp_key = *comp_reg.id_to_key(&id).unwrap();
-        let type_meta = type_reg.key_to_meta(&type_key).unwrap().clone();
-        let comp_meta = comp_reg.key_to_meta(&comp_key).unwrap().clone();
-        ColumnEntry { type_key, type_meta, comp_key, comp_meta }
-    }
-
-    fn meta() -> ArchetypeMeta {
-        let (type_reg, comp_reg) = registries();
-        ArchetypeMeta::new(
-            COLUMNS
-                .iter()
-                .map(|c| column(&type_reg, &comp_reg, c.id))
-                .collect(),
-            &type_reg,
-            &comp_reg,
-        )
-        .unwrap()
+        /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
+        pub fn meta(&self) -> ArchetypeMeta {
+            ArchetypeMeta::new(
+                COLUMNS.iter().map(|c| self.column(c.id)).collect(),
+                &self.type_reg,
+                &self.comp_reg,
+            )
+            .unwrap()
+        }
     }
 
     #[test]
     fn lays_out_columns_without_gaps() {
-        let meta = meta();
-        let layout = ArchetypeChunkLayout::with_capacity(&meta, 10).unwrap();
+        let ctx = TestContext::mock();
+        let layout = ArchetypeChunkLayout::with_capacity(&ctx.meta(), 10).unwrap();
 
         // column 0 (align 8) sorts before column 1 (align 4), so its array starts at offset 0.
         assert_eq!(layout.capacity(), 10);
@@ -222,8 +227,8 @@ mod tests {
 
     #[test]
     fn excessive_capacity_is_rejected() {
-        let meta = meta();
-        let result = ArchetypeChunkLayout::with_capacity(&meta, 1000);
+        let ctx = TestContext::mock();
+        let result = ArchetypeChunkLayout::with_capacity(&ctx.meta(), 1000);
 
         assert!(matches!(
             result,
@@ -236,8 +241,8 @@ mod tests {
 
     #[test]
     fn empty_meta_only_keep_entity_key() {
-        let (type_reg, comp_reg) = registries();
-        let meta = ArchetypeMeta::new(vec![], &type_reg, &comp_reg).unwrap();
+        let ctx = TestContext::mock();
+        let meta = ArchetypeMeta::new(vec![], &ctx.type_reg, &ctx.comp_reg).unwrap();
         let capacity_layout = ArchetypeChunkLayout::with_capacity(&meta, 100).unwrap();
         let size_layout = ArchetypeChunkLayout::with_buffer_size(&meta, 1024).unwrap();
 
@@ -250,10 +255,10 @@ mod tests {
 
     #[test]
     fn buffer_size_preserves_requested_budget() {
-        let meta = meta();
+        let ctx = TestContext::mock();
         // The recorded buffer size keeps the requested budget; only the layout computation
         // rounds down to the 8-aligned boundary, leaving the 4 trailing bytes unused.
-        let layout = ArchetypeChunkLayout::with_buffer_size(&meta, 4096 + 4).unwrap();
+        let layout = ArchetypeChunkLayout::with_buffer_size(&ctx.meta(), 4096 + 4).unwrap();
 
         assert_eq!(layout.buffer_size(), 4096 + 4);
         assert_eq!(layout.capacity(), 4096 / (COLUMNS[0].size + COLUMNS[1].size + ENTITY_KEY_SIZE));
@@ -263,9 +268,9 @@ mod tests {
 
     #[test]
     fn buffer_size_over_max_is_rejected() {
-        let meta = meta();
+        let ctx = TestContext::mock();
         let result = ArchetypeChunkLayout::with_buffer_size(
-            &meta,
+            &ctx.meta(),
             ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE + 1,
         );
 

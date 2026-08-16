@@ -102,8 +102,8 @@ impl ArchetypeChunk {
     ///
     /// The caller must ensure no aliasing references exist and must not read or
     /// overwrite slots beyond `self.len` by assignment: they are uninitialized. Write
-    /// new keys with `ptr::write` and advance `self.len` via [`Self::set_len`] so the
-    /// safe getters see them.
+    /// new keys with ptr operation (write or copy) and advance `self.len` via
+    /// [`Self::set_len`] so the safe getters see them.
     pub unsafe fn get_entity_keys_mut_ptr(&mut self) -> *mut EntityKey {
         // SAFETY: `buf_ptr` is a `buffer_size`-byte, `buffer_align`-aligned allocation
         // and the array of `capacity` elements fits entirely inside it at `entity_key_offset`.
@@ -161,8 +161,8 @@ impl ArchetypeChunk {
     ///
     /// The caller must ensure no aliasing references exist and must not read or
     /// overwrite slots beyond `self.len` by assignment: they are uninitialized. Write
-    /// new values with `ptr::write` and advance `self.len` via [`Self::set_len`] so the
-    /// safe getters see them.
+    /// new values with ptr operation (write or copy) and advance `self.len` via
+    /// [`Self::set_len`] so the safe getters see them.
     ///
     /// # Panics
     ///
@@ -172,6 +172,48 @@ impl ArchetypeChunk {
         // and the `index`-th column array of `capacity` elements fits entirely inside it
         // at its column offset.
         unsafe { self.buf_ptr.add(self.layout.column_offsets()[index]) }
+    }
+
+    /// Moves the live data of this chunk into `other`, the `len` of `self` will be reset.
+    ///
+    /// # Safety
+    ///
+    /// `self` and `other` must share the same `meta`, have enough capacity and distinct
+    /// allocations.
+    pub unsafe fn move_data_into(&mut self, other: &mut Self) {
+        debug_assert!(Rc::ptr_eq(&self.meta, &other.meta), "chunks must share meta");
+        debug_assert!(
+            other.layout.capacity() >= self.len,
+            "target chunk is smaller than the source's live count"
+        );
+
+        // SAFETY: both pointers are the starts of the entity key arrays in their own
+        // allocations; `self.len <= other.layout.capacity()` keeps the copy within the
+        // destination array.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.buf_ptr.add(self.layout.entity_key_offset()) as *const EntityKey,
+                other.buf_ptr.add(other.layout.entity_key_offset()) as *mut EntityKey,
+                self.len,
+            );
+        }
+
+        for (index, column) in self.meta.columns().iter().enumerate() {
+            let bytes = self.len * column.type_meta.size;
+            // SAFETY: both pointers are the starts of the `index`-th column array in
+            // their own allocations (each chunk's offset is scaled by its own
+            // capacity), and `self.len <= other.layout.capacity()` keeps the copy
+            // within the destination column array.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    self.buf_ptr.add(self.layout.column_offsets()[index]),
+                    other.buf_ptr.add(other.layout.column_offsets()[index]),
+                    bytes,
+                );
+            }
+        }
+        other.len = self.len;
+        self.len = 0;
     }
 
     /// Debug-only invariant check: panics if `layout` is inconsistent with `meta`, i.e. could
@@ -232,65 +274,123 @@ mod tests {
         component::{ComponentKind, ComponentMeta, ComponentRegistry},
         types::{TypeId, TypeMeta, TypeRegistry},
     };
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A non-trivial component carrying a payload observable from its drop glue.
-    #[derive(Component)]
-    struct Tracked(u64);
+    /// Test-local drop counters. Each test owns its own `Arc<Tracker>`, so tests never
+    /// share mutable state and can run in parallel.
+    #[derive(Default)]
+    struct Tracker {
+        count: AtomicUsize,
+        sum: AtomicUsize,
+    }
 
-    impl Drop for Tracked {
-        fn drop(&mut self) {
-            DROP_COUNT.fetch_add(1, Ordering::SeqCst);
-            DROP_SUM.fetch_add(self.0 as usize, Ordering::SeqCst);
+    impl Tracker {
+        fn new() -> Arc<Self> {
+            Arc::default()
         }
     }
 
-    /// Number of times a [`Tracked`] has been dropped.
-    static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
-    /// Sum of payloads of dropped [`Tracked`]s, to verify element pointers.
-    static DROP_SUM: AtomicUsize = AtomicUsize::new(0);
+    /// A non-trivial component carrying a payload; dropping it records the payload on
+    /// the [`Tracker`] it holds a handle to.
+    #[derive(Component)]
+    struct Tracked {
+        value: u64,
+        tracker: Arc<Tracker>,
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.tracker.count.fetch_add(1, Ordering::SeqCst);
+            self.tracker
+                .sum
+                .fetch_add(self.value as usize, Ordering::SeqCst);
+        }
+    }
 
     const COLUMNS: [TypeMeta; 2] = [
         TypeMeta::new(TypeId::of_script(1), 8, 8, "column_0"),
         TypeMeta::new(TypeId::of_script(2), 4, 4, "column_1"),
     ];
 
-    fn registries() -> (TypeRegistry, ComponentRegistry) {
-        let mut type_reg = TypeRegistry::default();
-        let mut comp_reg = ComponentRegistry::default();
+    /// Owns the registries backing the columns under test, so keys derived from them stay
+    /// resolvable for the lifetime of the context.
+    struct TestContext {
+        type_reg: TypeRegistry,
+        comp_reg: ComponentRegistry,
+    }
 
-        for column in &COLUMNS {
-            type_reg.register(column.clone());
-            comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
+    impl TestContext {
+        /// Builds a context holding the [`COLUMNS`] registrations, in registration order.
+        pub fn mock() -> Self {
+            let mut type_reg = TypeRegistry::default();
+            let mut comp_reg = ComponentRegistry::default();
+
+            for column in &COLUMNS {
+                type_reg.register(column.clone());
+                comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
+            }
+
+            Self { type_reg, comp_reg }
         }
 
-        (type_reg, comp_reg)
-    }
+        /// Builds a context for the tracker tests: a non-trivial `Tracked` (16 bytes,
+        /// 8-align) and a trivial `u64` (8 bytes, 8-align).
+        pub fn mock_tracked() -> Self {
+            let mut type_reg = TypeRegistry::default();
+            let mut comp_reg = ComponentRegistry::default();
+            type_reg.register(TypeMeta::of::<Tracked>());
+            type_reg.register(TypeMeta::new(TypeId::of_script(1), 8, 8, "trivial"));
+            comp_reg.register(ComponentMeta::of::<Tracked>());
+            comp_reg.register(ComponentMeta::new(TypeId::of_script(1), ComponentKind::Trivial));
+            Self { type_reg, comp_reg }
+        }
 
-    fn column(type_reg: &TypeRegistry, comp_reg: &ComponentRegistry, id: TypeId) -> ColumnEntry {
-        let type_key = *type_reg.id_to_key(&id).unwrap();
-        let comp_key = *comp_reg.id_to_key(&id).unwrap();
-        let type_meta = type_reg.key_to_meta(&type_key).unwrap().clone();
-        let comp_meta = comp_reg.key_to_meta(&comp_key).unwrap().clone();
-        ColumnEntry { type_key, type_meta, comp_key, comp_meta }
-    }
+        pub fn column(&self, id: TypeId) -> ColumnEntry {
+            let type_key = *self.type_reg.id_to_key(&id).unwrap();
+            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
+            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap().clone();
+            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap().clone();
+            ColumnEntry { type_key, type_meta, comp_key, comp_meta }
+        }
 
-    fn meta() -> ArchetypeMeta {
-        let (type_reg, comp_reg) = registries();
-        ArchetypeMeta::new(
-            COLUMNS
-                .iter()
-                .map(|c| column(&type_reg, &comp_reg, c.id))
-                .collect(),
-            &type_reg,
-            &comp_reg,
-        )
-        .unwrap()
-    }
+        /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
+        pub fn meta(&self) -> ArchetypeMeta {
+            ArchetypeMeta::new(
+                COLUMNS.iter().map(|c| self.column(c.id)).collect(),
+                &self.type_reg,
+                &self.comp_reg,
+            )
+            .unwrap()
+        }
 
-    fn chunk(meta: ArchetypeMeta, capacity: usize) -> ArchetypeChunk {
-        let layout = ArchetypeChunkLayout::with_capacity(&meta, capacity).unwrap();
-        ArchetypeChunk::new(Rc::new(meta), Rc::new(layout))
+        /// Builds the two-column meta used by the tracker tests over this context's
+        /// registrations.
+        pub fn tracked_meta(&self) -> Rc<ArchetypeMeta> {
+            let tracked_id = TypeId::of::<Tracked>();
+            let trivial_id = TypeId::of_script(1);
+            Rc::new(
+                ArchetypeMeta::new(
+                    Vec::from([tracked_id, trivial_id].map(|id| self.column(id))),
+                    &self.type_reg,
+                    &self.comp_reg,
+                )
+                .unwrap(),
+            )
+        }
+
+        /// Builds a chunk over `meta`.
+        pub fn chunk(&self, meta: ArchetypeMeta, capacity: usize) -> ArchetypeChunk {
+            let layout = ArchetypeChunkLayout::with_capacity(&meta, capacity).unwrap();
+            ArchetypeChunk::new(Rc::new(meta), Rc::new(layout))
+        }
+
+        /// Builds a chunk sharing `meta` with others, as `move_data_into` requires the two
+        /// chunks to hold the same `Rc<ArchetypeMeta>`.
+        pub fn chunk_shared(&self, meta: &Rc<ArchetypeMeta>, capacity: usize) -> ArchetypeChunk {
+            let layout = ArchetypeChunkLayout::with_capacity(meta, capacity).unwrap();
+            ArchetypeChunk::new(meta.clone(), Rc::new(layout))
+        }
     }
 
     /// Places distinct patterns into all regions via the raw-pointer getters (covering
@@ -301,7 +401,8 @@ mod tests {
         const CAPACITY: usize = 16;
         const LEN: usize = 7;
 
-        let mut chunk = chunk(meta(), CAPACITY);
+        let ctx = TestContext::mock();
+        let mut chunk = ctx.chunk(ctx.meta(), CAPACITY);
 
         // Placement via the raw-pointer getters. The slots are uninitialized, hence
         // `ptr::write` rather than assignment.
@@ -361,9 +462,9 @@ mod tests {
     /// An empty-metadata chunk holds only the entity key array; keys round-trip normally.
     #[test]
     fn empty_meta_keys_round_trip() {
-        let (type_reg, comp_reg) = registries();
-        let meta = ArchetypeMeta::new(vec![], &type_reg, &comp_reg).unwrap();
-        let mut chunk = chunk(meta, 8);
+        let ctx = TestContext::mock();
+        let meta = ArchetypeMeta::new(vec![], &ctx.type_reg, &ctx.comp_reg).unwrap();
+        let mut chunk = ctx.chunk(meta, 8);
 
         // Place three keys, then publish them with `set_len`.
         unsafe {
@@ -390,7 +491,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "out of bounds")]
     fn get_column_out_of_bounds_panics() {
-        let chunk = chunk(meta(), 8);
+        let ctx = TestContext::mock();
+        let chunk = ctx.chunk(ctx.meta(), 8);
         let _ = chunk.get_column(2); // only columns 0 and 1 exist
     }
 
@@ -398,7 +500,8 @@ mod tests {
     #[test]
     #[should_panic]
     fn set_len_beyond_capacity_panics() {
-        let mut chunk = chunk(meta(), 8);
+        let ctx = TestContext::mock();
+        let mut chunk = ctx.chunk(ctx.meta(), 8);
         unsafe { chunk.set_len(9) };
     }
 
@@ -406,48 +509,103 @@ mod tests {
     /// element — `len` times, not `capacity` — with pointers into the correct elements.
     #[test]
     fn drop_calls_non_trivial_columns_per_element() {
-        DROP_COUNT.store(0, Ordering::SeqCst);
-        DROP_SUM.store(0, Ordering::SeqCst);
+        let tracker = Tracker::new();
+        let ctx = TestContext::mock_tracked();
+        let meta = ctx.tracked_meta();
+        let mut chunk = ctx.chunk_shared(&meta, 8);
 
-        // `Tracked` implements `Drop`, so `ComponentMeta::of` registers it as non-trivial
-        // via `needs_drop` — exactly like a real component. The two 8-byte/8-align columns
-        // tie on layout, so `ArchetypeMeta` orders them by component key index: the
-        // trivial one first (index 0), the tracked one second.
-        let trivial_id = TypeId::of_script(1);
-        let tracked_id = TypeId::of::<Tracked>();
-
-        let mut type_reg = TypeRegistry::default();
-        let mut comp_reg = ComponentRegistry::default();
-        type_reg.register(TypeMeta::new(trivial_id, 8, 8, "trivial"));
-        type_reg.register(TypeMeta::of::<Tracked>());
-        comp_reg.register(ComponentMeta::new(trivial_id, ComponentKind::Trivial));
-        comp_reg.register(ComponentMeta::of::<Tracked>());
-
-        let meta = ArchetypeMeta::new(
-            Vec::from([trivial_id, tracked_id].map(|id| column(&type_reg, &comp_reg, id))),
-            &type_reg,
-            &comp_reg,
-        )
-        .unwrap();
-        let tracked_col = meta.column_index(&tracked_id).unwrap();
-
-        let mut chunk = chunk(meta, 8);
-
-        // Place four live `Tracked` values into the non-trivial column via the raw-pointer
-        // getter. `ptr::write` (not assignment) is required because the slots are
-        // uninitialized: assignment would first drop whatever garbage is there — the same
-        // trap a real ECS insertion avoids.
+        // Place four live `Tracked` values into the non-trivial column (column 0) via
+        // `ptr::write` (not assignment): the slots are uninitialized, and assignment
+        // would first drop garbage — the same trap a real ECS insertion avoids.
         unsafe {
-            let elements = chunk.get_column_mut_ptr(tracked_col) as *mut Tracked;
+            let elements = chunk.get_column_mut_ptr(0) as *mut Tracked;
             for i in 0..4 {
-                std::ptr::write(elements.add(i), Tracked((i as u64 + 1) * 10));
+                std::ptr::write(
+                    elements.add(i),
+                    Tracked { value: (i as u64 + 1) * 10, tracker: tracker.clone() },
+                );
             }
             chunk.set_len(4)
         }
 
         drop(chunk);
 
-        assert_eq!(DROP_COUNT.load(Ordering::SeqCst), 4);
-        assert_eq!(DROP_SUM.load(Ordering::SeqCst), 10 + 20 + 30 + 40);
+        assert_eq!(tracker.count.load(Ordering::SeqCst), 4);
+        assert_eq!(tracker.sum.load(Ordering::SeqCst), 10 + 20 + 30 + 40);
+    }
+
+    /// `move_data_into` relocates the entity keys and every column's live elements into
+    /// the target chunk, resets the source's length, and hands the non-trivial
+    /// components over without dropping them twice: the source is emptied before it is
+    /// dropped, so each component is dropped exactly once, from the target.
+    #[test]
+    fn move_data_into_transfers_and_drops_once() {
+        let tracker = Tracker::new();
+        let ctx = TestContext::mock_tracked();
+        let meta = ctx.tracked_meta();
+        let mut source = ctx.chunk_shared(&meta, 8);
+        let mut target = ctx.chunk_shared(&meta, 16);
+
+        // SAFETY: writes only into the source's slots.
+        unsafe {
+            let keys = source.get_entity_keys_mut_ptr();
+            for i in 0..3 {
+                std::ptr::write(
+                    keys.add(i),
+                    EntityKey { index: 100 + i, generation: 7, instance_id: 3 },
+                );
+            }
+
+            let tracked = source.get_column_mut_ptr(0) as *mut Tracked;
+            for i in 0..3 {
+                std::ptr::write(
+                    tracked.add(i),
+                    Tracked { value: (i as u64 + 1) * 10, tracker: tracker.clone() },
+                );
+            }
+
+            let trivial = source.get_column_mut_ptr(1) as *mut u64;
+            for i in 0..3 {
+                std::ptr::write(trivial.add(i), (i as u64 + 1) << 32);
+            }
+            source.set_len(3);
+
+            source.move_data_into(&mut target)
+        };
+
+        // The source is emptied; the target takes over the moved count.
+        assert_eq!(source.len(), 0);
+        assert_eq!(target.len(), 3);
+
+        // Keys and both columns survived the move.
+        for (i, key) in target.get_entity_keys().iter().enumerate() {
+            assert_eq!(key.index, 100 + i);
+            assert_eq!(key.generation, 7);
+            assert_eq!(key.instance_id, 3);
+        }
+
+        let tracked = target.get_column(0);
+        let tracked = tracked.as_ptr() as *const Tracked;
+        for i in 0..3 {
+            // SAFETY: the byte slice is the moved `Tracked` column.
+            assert_eq!(unsafe { (*tracked.add(i)).value }, (i as u64 + 1) * 10);
+        }
+
+        let values: Vec<u64> = target
+            .get_column(1)
+            .chunks_exact(8)
+            .map(|bytes| u64::from_ne_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![1u64 << 32, 2 << 32, 3 << 32]);
+
+        drop(source);
+        // The emptied source drops nothing.
+        assert_eq!(tracker.count.load(Ordering::SeqCst), 0);
+
+        drop(target);
+        // Each component dropped exactly once, from the target (the source's reset
+        // length prevented a second drop from the old buffer).
+        assert_eq!(tracker.count.load(Ordering::SeqCst), 3);
+        assert_eq!(tracker.sum.load(Ordering::SeqCst), 10 + 20 + 30);
     }
 }

@@ -107,11 +107,11 @@ impl ArchetypeMeta {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ArchetypeMetaError {
     /// A column's `TypeKey` does not resolve in the `TypeRegistry`.
-    #[error("column type key does not resolve\n -> {0}")]
+    #[error(transparent)]
     Type(#[from] TypeRegistryError),
 
     /// A column's `ComponentKey` does not resolve in the `ComponentRegistry`.
-    #[error("column component key does not resolve\n -> {0}")]
+    #[error(transparent)]
     Component(#[from] ComponentRegistryError),
 
     /// A column's type key and component key resolve to different underlying types.
@@ -125,70 +125,70 @@ mod tests {
     use crate::component::{ComponentKind, ComponentMeta};
     use crate::types::TypeMeta;
 
-    /// Builds a type and component registry pair containing the given (id, size, align) set.
-    /// Component registration order matches the slice order, so comp key indices are 0..n.
-    fn registries() -> (TypeRegistry, ComponentRegistry) {
-        let mut type_reg = TypeRegistry::default();
-        let mut comp_reg = ComponentRegistry::default();
+    struct TestContext {
+        type_reg: TypeRegistry,
+        comp_reg: ComponentRegistry,
+    }
 
-        // script 1: align 8, size 8
-        // script 2: align 4, size 4
-        // script 3: align 2, size 2
-        // script 4: align 8, size 16
-        // script 5: align 8, size 8
-        // script 6: align 4, size 4
-        // script 7: align 4, size 4
-        let types = [
-            (TypeId::of_script(1), 8usize, 8usize),
-            (TypeId::of_script(2), 4, 4),
-            (TypeId::of_script(3), 2, 2),
-            (TypeId::of_script(4), 16, 8),
-            (TypeId::of_script(5), 8, 8),
-            (TypeId::of_script(6), 4, 4),
-            (TypeId::of_script(7), 4, 4),
-        ];
-        for (id, size, align) in types {
-            type_reg.register(TypeMeta::new(id, size, align, "test"));
-            comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
+    impl TestContext {
+        /// Builds a context containing the given (id, size, align) set. Component registration
+        /// order matches the slice order, so comp key indices are 0..n.
+        pub fn mock() -> Self {
+            let mut type_reg = TypeRegistry::default();
+            let mut comp_reg = ComponentRegistry::default();
+
+            let types = [
+                (TypeId::of_script(1), 8, 8),
+                (TypeId::of_script(2), 4, 4),
+                (TypeId::of_script(3), 2, 2),
+                (TypeId::of_script(4), 16, 8),
+                (TypeId::of_script(5), 8, 8),
+                (TypeId::of_script(6), 4, 4),
+                (TypeId::of_script(7), 4, 4),
+            ];
+            for (id, size, align) in types {
+                type_reg.register(TypeMeta::new(id, size, align, "test"));
+                comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
+            }
+
+            Self { type_reg, comp_reg }
         }
 
-        (type_reg, comp_reg)
-    }
+        pub fn column(&self, id: TypeId) -> ColumnEntry {
+            let type_key = *self.type_reg.id_to_key(&id).unwrap();
+            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
+            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap().clone();
+            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap().clone();
+            ColumnEntry { type_key, type_meta, comp_key, comp_meta }
+        }
 
-    fn column(type_reg: &TypeRegistry, comp_reg: &ComponentRegistry, id: TypeId) -> ColumnEntry {
-        let type_key = *type_reg.id_to_key(&id).unwrap();
-        let comp_key = *comp_reg.id_to_key(&id).unwrap();
-        let type_meta = type_reg.key_to_meta(&type_key).unwrap().clone();
-        let comp_meta = comp_reg.key_to_meta(&comp_key).unwrap().clone();
-        ColumnEntry { type_key, type_meta, comp_key, comp_meta }
-    }
-
-    /// Resolves the `TypeId` backing the column at `index`.
-    fn column_id(meta: &ArchetypeMeta, type_reg: &TypeRegistry, index: usize) -> TypeId {
-        type_reg
-            .key_to_meta(&meta.columns()[index].type_key)
-            .unwrap()
-            .id
+        /// Resolves the `TypeId` backing the column at `index`.
+        pub fn column_id(&self, meta: &ArchetypeMeta, index: usize) -> TypeId {
+            self.type_reg
+                .key_to_meta(&meta.columns()[index].type_key)
+                .unwrap()
+                .id
+        }
     }
 
     #[test]
     fn sorts_by_alignment_descending() {
-        let (type_reg, comp_reg) = registries();
+        let ctx = TestContext::mock();
         let meta = ArchetypeMeta::new(
             vec![
-                column(&type_reg, &comp_reg, TypeId::of_script(3)), // align 2
-                column(&type_reg, &comp_reg, TypeId::of_script(1)), // align 8
-                column(&type_reg, &comp_reg, TypeId::of_script(2)), // align 4
+                ctx.column(TypeId::of_script(3)), // align 2
+                ctx.column(TypeId::of_script(1)), // align 8
+                ctx.column(TypeId::of_script(2)), // align 4
             ],
-            &type_reg,
-            &comp_reg,
+            &ctx.type_reg,
+            &ctx.comp_reg,
         )
         .unwrap();
 
         assert_eq!(meta.columns().len(), 3);
-        assert_eq!(column_id(&meta, &type_reg, 0), TypeId::of_script(1));
-        assert_eq!(column_id(&meta, &type_reg, 1), TypeId::of_script(2));
-        assert_eq!(column_id(&meta, &type_reg, 2), TypeId::of_script(3));
+        assert_eq!(ctx.column_id(&meta, 0), TypeId::of_script(1));
+        assert_eq!(ctx.column_id(&meta, 1), TypeId::of_script(2));
+        assert_eq!(ctx.column_id(&meta, 2), TypeId::of_script(3));
         assert_eq!(meta.column_index(&TypeId::of_script(1)).unwrap(), 0);
         assert_eq!(meta.column_index(&TypeId::of_script(2)).unwrap(), 1);
         assert_eq!(meta.column_index(&TypeId::of_script(3)).unwrap(), 2);
@@ -196,41 +196,41 @@ mod tests {
 
     #[test]
     fn sorts_by_size_descending_within_same_alignment() {
-        let (type_reg, comp_reg) = registries();
+        let ctx = TestContext::mock();
         let meta = ArchetypeMeta::new(
             vec![
-                column(&type_reg, &comp_reg, TypeId::of_script(5)), // align 8, size 8
-                column(&type_reg, &comp_reg, TypeId::of_script(4)), // align 8, size 16
+                ctx.column(TypeId::of_script(5)), // align 8, size 8
+                ctx.column(TypeId::of_script(4)), // align 8, size 16
             ],
-            &type_reg,
-            &comp_reg,
+            &ctx.type_reg,
+            &ctx.comp_reg,
         )
         .unwrap();
 
-        assert_eq!(column_id(&meta, &type_reg, 0), TypeId::of_script(4));
-        assert_eq!(column_id(&meta, &type_reg, 1), TypeId::of_script(5));
+        assert_eq!(ctx.column_id(&meta, 0), TypeId::of_script(4));
+        assert_eq!(ctx.column_id(&meta, 1), TypeId::of_script(5));
     }
 
     #[test]
     fn sorts_by_component_index_ascending_on_layout_tie() {
-        let (type_reg, comp_reg) = registries();
+        let ctx = TestContext::mock();
         let meta = ArchetypeMeta::new(
             vec![
-                column(&type_reg, &comp_reg, TypeId::of_script(7)), // comp index 6
-                column(&type_reg, &comp_reg, TypeId::of_script(6)), // comp index 5
+                ctx.column(TypeId::of_script(7)), // comp index 6
+                ctx.column(TypeId::of_script(6)), // comp index 5
             ],
-            &type_reg,
-            &comp_reg,
+            &ctx.type_reg,
+            &ctx.comp_reg,
         )
         .unwrap();
 
-        assert_eq!(column_id(&meta, &type_reg, 0), TypeId::of_script(6));
-        assert_eq!(column_id(&meta, &type_reg, 1), TypeId::of_script(7));
+        assert_eq!(ctx.column_id(&meta, 0), TypeId::of_script(6));
+        assert_eq!(ctx.column_id(&meta, 1), TypeId::of_script(7));
     }
 
     #[test]
     fn ordering_is_independent_of_input_order() {
-        let (type_reg, comp_reg) = registries();
+        let ctx = TestContext::mock();
         let ids = [
             TypeId::of_script(3),
             TypeId::of_script(1),
@@ -242,20 +242,15 @@ mod tests {
         ];
 
         let forward = ArchetypeMeta::new(
-            ids.iter()
-                .map(|id| column(&type_reg, &comp_reg, *id))
-                .collect(),
-            &type_reg,
-            &comp_reg,
+            ids.iter().map(|id| ctx.column(*id)).collect(),
+            &ctx.type_reg,
+            &ctx.comp_reg,
         )
         .unwrap();
         let reversed = ArchetypeMeta::new(
-            ids.iter()
-                .rev()
-                .map(|id| column(&type_reg, &comp_reg, *id))
-                .collect(),
-            &type_reg,
-            &comp_reg,
+            ids.iter().rev().map(|id| ctx.column(*id)).collect(),
+            &ctx.type_reg,
+            &ctx.comp_reg,
         )
         .unwrap();
 
@@ -274,7 +269,7 @@ mod tests {
 
         for meta in [&forward, &reversed] {
             let order: Vec<TypeId> = (0..meta.columns().len())
-                .map(|i| column_id(meta, &type_reg, i))
+                .map(|i| ctx.column_id(meta, i))
                 .collect();
             assert_eq!(order, expected);
             for (index, id) in expected.iter().enumerate() {
@@ -285,16 +280,16 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_type_and_component_keys() {
-        let (type_reg, comp_reg) = registries();
-        let type_key = *type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
-        let comp_key = *comp_reg.id_to_key(&TypeId::of_script(2)).unwrap();
-        let type_meta = type_reg.key_to_meta(&type_key).unwrap().clone();
-        let comp_meta = comp_reg.key_to_meta(&comp_key).unwrap().clone();
+        let ctx = TestContext::mock();
+        let type_key = *ctx.type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+        let comp_key = *ctx.comp_reg.id_to_key(&TypeId::of_script(2)).unwrap();
+        let type_meta = ctx.type_reg.key_to_meta(&type_key).unwrap().clone();
+        let comp_meta = ctx.comp_reg.key_to_meta(&comp_key).unwrap().clone();
 
         let result = ArchetypeMeta::new(
             vec![ColumnEntry { type_key, type_meta, comp_key, comp_meta }],
-            &type_reg,
-            &comp_reg,
+            &ctx.type_reg,
+            &ctx.comp_reg,
         );
 
         assert!(matches!(
@@ -306,18 +301,18 @@ mod tests {
 
     #[test]
     fn rejects_unresolved_type_key() {
-        let (mut type_reg, comp_reg) = registries();
-        let type_key = *type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
-        let comp_key = *comp_reg.id_to_key(&TypeId::of_script(1)).unwrap();
-        let type_meta = type_reg.key_to_meta(&type_key).unwrap().clone();
-        let comp_meta = comp_reg.key_to_meta(&comp_key).unwrap().clone();
+        let mut ctx = TestContext::mock();
+        let type_key = *ctx.type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+        let comp_key = *ctx.comp_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+        let type_meta = ctx.type_reg.key_to_meta(&type_key).unwrap().clone();
+        let comp_meta = ctx.comp_reg.key_to_meta(&comp_key).unwrap().clone();
         // Stale the type key so it no longer resolves.
-        type_reg.unregister(type_key).unwrap();
+        ctx.type_reg.unregister(type_key).unwrap();
 
         let result = ArchetypeMeta::new(
             vec![ColumnEntry { type_key, type_meta, comp_key, comp_meta }],
-            &type_reg,
-            &comp_reg,
+            &ctx.type_reg,
+            &ctx.comp_reg,
         );
 
         assert!(matches!(result, Err(ArchetypeMetaError::Type(_))));
@@ -325,18 +320,18 @@ mod tests {
 
     #[test]
     fn rejects_unresolved_component_key() {
-        let (type_reg, mut comp_reg) = registries();
-        let type_key = *type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
-        let comp_key = *comp_reg.id_to_key(&TypeId::of_script(1)).unwrap();
-        let type_meta = type_reg.key_to_meta(&type_key).unwrap().clone();
-        let comp_meta = comp_reg.key_to_meta(&comp_key).unwrap().clone();
+        let mut ctx = TestContext::mock();
+        let type_key = *ctx.type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+        let comp_key = *ctx.comp_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+        let type_meta = ctx.type_reg.key_to_meta(&type_key).unwrap().clone();
+        let comp_meta = ctx.comp_reg.key_to_meta(&comp_key).unwrap().clone();
         // Stale the component key so it no longer resolves.
-        comp_reg.unregister(comp_key).unwrap();
+        ctx.comp_reg.unregister(comp_key).unwrap();
 
         let result = ArchetypeMeta::new(
             vec![ColumnEntry { type_key, type_meta, comp_key, comp_meta }],
-            &type_reg,
-            &comp_reg,
+            &ctx.type_reg,
+            &ctx.comp_reg,
         );
 
         assert!(matches!(result, Err(ArchetypeMetaError::Component(_))));
