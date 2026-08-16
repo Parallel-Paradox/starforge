@@ -5,6 +5,7 @@ pub trait CoreExtract {
 }
 
 /// Implement for tuples of types that implement [`CoreExtract`].
+#[macro_export]
 macro_rules! impl_core_extract_tuple {
     ([$($ty:ident),+]) => {
         impl<$($ty: CoreExtract),+> CoreExtract for ($($ty,)+) {
@@ -28,7 +29,7 @@ for_tuples!(
 /// For example, `extend_core_extract_tuple!([T16, T17])` will implement
 /// [`CoreExtract`] for tuples of arity 16 and 17.
 ///
-/// `use starforge_core::for_tuples;` must be in scope for this macro to work.
+/// Dependency in this file must be in scope for this macro to work.
 #[macro_export]
 macro_rules! extend_core_extract_tuple {
     ([$($ty:ident),+]) => {
