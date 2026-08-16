@@ -164,10 +164,7 @@ mod tests {
 
         /// Resolves the `TypeId` backing the column at `index`.
         pub fn column_id(&self, meta: &ArchetypeMeta, index: usize) -> TypeId {
-            self.type_reg
-                .key_to_meta(&meta.columns()[index].type_key)
-                .unwrap()
-                .id
+            self.type_reg.key_to_meta(&meta.columns()[index].type_key).unwrap().id
         }
     }
 
@@ -268,9 +265,8 @@ mod tests {
         ];
 
         for meta in [&forward, &reversed] {
-            let order: Vec<TypeId> = (0..meta.columns().len())
-                .map(|i| ctx.column_id(meta, i))
-                .collect();
+            let order: Vec<TypeId> =
+                (0..meta.columns().len()).map(|i| ctx.column_id(meta, i)).collect();
             assert_eq!(order, expected);
             for (index, id) in expected.iter().enumerate() {
                 assert_eq!(meta.column_index(id).unwrap(), index);

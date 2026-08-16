@@ -188,9 +188,7 @@ impl TypeRegistry {
 
     /// Looks up the current `TypeKey` registered for `id`.
     pub fn id_to_key(&self, id: &TypeId) -> Result<&TypeKey, TypeRegistryError> {
-        self.id_to_key
-            .get(id)
-            .ok_or(TypeRegistryError::UnknownType { id: *id })
+        self.id_to_key.get(id).ok_or(TypeRegistryError::UnknownType { id: *id })
     }
 
     /// Looks up the `TypeMeta` registered for `id`.
@@ -209,12 +207,10 @@ impl TypeRegistry {
             });
         }
         let (stored_key, meta) =
-            self.meta_entries
-                .get(key.index)
-                .ok_or(TypeRegistryError::IndexOutOfBounds {
-                    index: key.index,
-                    bounds: self.meta_entries.len(),
-                })?;
+            self.meta_entries.get(key.index).ok_or(TypeRegistryError::IndexOutOfBounds {
+                index: key.index,
+                bounds: self.meta_entries.len(),
+            })?;
         if stored_key.generation != key.generation {
             return Err(TypeRegistryError::GenerationMismatch {
                 expected: stored_key.generation,

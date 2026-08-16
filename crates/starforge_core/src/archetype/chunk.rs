@@ -1,6 +1,7 @@
 use std::{
     alloc::{Layout, dealloc},
-    rc::Rc,
+    slice::{ChunksExact, ChunksExactMut},
+    sync::Arc,
 };
 
 use crate::{
@@ -10,14 +11,20 @@ use crate::{
 };
 
 pub struct ArchetypeChunk {
-    pub meta: Rc<ArchetypeMeta>,
-    pub layout: Rc<ArchetypeChunkLayout>,
+    /// The metadata describing the archetype of this chunk, including its columns and their types.
+    pub meta: Arc<ArchetypeMeta>,
+    /// The layout of the chunk's buffer, including offsets and sizes of columns and entity keys.
+    pub layout: Arc<ArchetypeChunkLayout>,
     buf_ptr: *mut u8,
     len: usize,
 }
 
+unsafe impl Send for ArchetypeChunk {}
+
 impl ArchetypeChunk {
-    pub fn new(meta: Rc<ArchetypeMeta>, layout: Rc<ArchetypeChunkLayout>) -> Self {
+    /// Creates a new `ArchetypeChunk` with the given metadata and layout,
+    /// allocating a buffer for its data.
+    pub fn new(meta: Arc<ArchetypeMeta>, layout: Arc<ArchetypeChunkLayout>) -> Self {
         Self::assert_meta_matches_layout(&meta, &layout);
         let buf_ptr = unsafe {
             // SAFETY: `buffer_align` is a power of two (the max of the column alignments,
@@ -59,10 +66,17 @@ impl Drop for ArchetypeChunk {
 }
 
 impl ArchetypeChunk {
+    /// Returns the number of valid entities in this chunk.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Sets the number of valid entities in this chunk.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `len` does not exceed the chunk's capacity and
+    /// the elements in the range `[self.len, len)` are properly initialized.
     pub unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.layout.capacity());
         self.len = len;
@@ -154,6 +168,35 @@ impl ArchetypeChunk {
         }
     }
 
+    /// Returns an iterator over the `index`-th column's valid entities, one
+    /// component-sized byte slice per entity.
+    ///
+    /// This is the lazy, allocation-free way to view the column as per-entity
+    /// slices: each yielded `&[u8]` has length `element_size`, covering exactly one
+    /// component value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds of the archetype's columns.
+    pub fn get_column_chunks(&self, index: usize) -> ChunksExact<'_, u8> {
+        self.get_column(index).chunks_exact(self.meta.columns()[index].type_meta.size)
+    }
+
+    /// Returns a mutable iterator over the `index`-th column's valid entities, one
+    /// component-sized byte slice per entity.
+    ///
+    /// This is the lazy, allocation-free way to view the column as per-entity
+    /// slices: each yielded `&mut [u8]` has length `element_size`, covering exactly
+    /// one component value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds of the archetype's columns.
+    pub fn get_column_chunks_mut(&mut self, index: usize) -> ChunksExactMut<'_, u8> {
+        let element_size = self.meta.columns()[index].type_meta.size;
+        self.get_column_mut(index).chunks_exact_mut(element_size)
+    }
+
     /// Returns a raw pointer to the start of the `index`-th column array, for placing
     /// new component values.
     ///
@@ -181,7 +224,7 @@ impl ArchetypeChunk {
     /// `self` and `other` must share the same `meta`, have enough capacity and distinct
     /// allocations.
     pub unsafe fn move_data_into(&mut self, other: &mut Self) {
-        debug_assert!(Rc::ptr_eq(&self.meta, &other.meta), "chunks must share meta");
+        debug_assert!(Arc::ptr_eq(&self.meta, &other.meta), "chunks must share meta");
         debug_assert!(
             other.layout.capacity() >= self.len,
             "target chunk is smaller than the source's live count"
@@ -302,9 +345,7 @@ mod tests {
     impl Drop for Tracked {
         fn drop(&mut self) {
             self.tracker.count.fetch_add(1, Ordering::SeqCst);
-            self.tracker
-                .sum
-                .fetch_add(self.value as usize, Ordering::SeqCst);
+            self.tracker.sum.fetch_add(self.value as usize, Ordering::SeqCst);
         }
     }
 
@@ -366,10 +407,10 @@ mod tests {
 
         /// Builds the two-column meta used by the tracker tests over this context's
         /// registrations.
-        pub fn tracked_meta(&self) -> Rc<ArchetypeMeta> {
+        pub fn tracked_meta(&self) -> Arc<ArchetypeMeta> {
             let tracked_id = TypeId::of::<Tracked>();
             let trivial_id = TypeId::of_script(1);
-            Rc::new(
+            Arc::new(
                 ArchetypeMeta::new(
                     Vec::from([tracked_id, trivial_id].map(|id| self.column(id))),
                     &self.type_reg,
@@ -382,14 +423,14 @@ mod tests {
         /// Builds a chunk over `meta`.
         pub fn chunk(&self, meta: ArchetypeMeta, capacity: usize) -> ArchetypeChunk {
             let layout = ArchetypeChunkLayout::with_capacity(&meta, capacity).unwrap();
-            ArchetypeChunk::new(Rc::new(meta), Rc::new(layout))
+            ArchetypeChunk::new(Arc::new(meta), Arc::new(layout))
         }
 
         /// Builds a chunk sharing `meta` with others, as `move_data_into` requires the two
-        /// chunks to hold the same `Rc<ArchetypeMeta>`.
-        pub fn chunk_shared(&self, meta: &Rc<ArchetypeMeta>, capacity: usize) -> ArchetypeChunk {
+        /// chunks to hold the same `Arc<ArchetypeMeta>`.
+        pub fn chunk_shared(&self, meta: &Arc<ArchetypeMeta>, capacity: usize) -> ArchetypeChunk {
             let layout = ArchetypeChunkLayout::with_capacity(meta, capacity).unwrap();
-            ArchetypeChunk::new(meta.clone(), Rc::new(layout))
+            ArchetypeChunk::new(meta.clone(), Arc::new(layout))
         }
     }
 
@@ -556,19 +597,25 @@ mod tests {
                 );
             }
 
-            let tracked = source.get_column_mut_ptr(0) as *mut Tracked;
-            for i in 0..3 {
+            // The chunked-mut getters expose exactly the first `len` rows, so the rows
+            // must be declared live before they can be filled through
+            // `get_column_chunks_mut`.
+            source.set_len(3);
+
+            // Column 0 is non-trivial: `ptr::write` (not assignment) moves each value
+            // into its uninitialized slot without dropping garbage.
+            for (i, slot) in source.get_column_chunks_mut(0).enumerate() {
                 std::ptr::write(
-                    tracked.add(i),
+                    slot.as_mut_ptr().cast::<Tracked>(),
                     Tracked { value: (i as u64 + 1) * 10, tracker: tracker.clone() },
                 );
             }
 
-            let trivial = source.get_column_mut_ptr(1) as *mut u64;
-            for i in 0..3 {
-                std::ptr::write(trivial.add(i), (i as u64 + 1) << 32);
+            // Column 1 is a trivial `u64`: a plain byte copy into the uninitialized
+            // slot.
+            for (i, slot) in source.get_column_chunks_mut(1).enumerate() {
+                slot.copy_from_slice(&((i as u64 + 1) << 32).to_ne_bytes());
             }
-            source.set_len(3);
 
             source.move_data_into(&mut target)
         };
@@ -584,17 +631,18 @@ mod tests {
             assert_eq!(key.instance_id, 3);
         }
 
-        let tracked = target.get_column(0);
-        let tracked = tracked.as_ptr() as *const Tracked;
-        for i in 0..3 {
-            // SAFETY: the byte slice is the moved `Tracked` column.
-            assert_eq!(unsafe { (*tracked.add(i)).value }, (i as u64 + 1) * 10);
+        // Read the non-trivial column back through `get_column_chunks`: one
+        // component-sized slot per row.
+        for (i, slot) in target.get_column_chunks(0).enumerate() {
+            // SAFETY: the slot is the moved `Tracked` value of the `i`-th row.
+            let tracked = unsafe { &*slot.as_ptr().cast::<Tracked>() };
+            assert_eq!(tracked.value, (i as u64 + 1) * 10);
         }
 
+        // Read the trivial column back; each slot is exactly `size_of::<u64>()` bytes.
         let values: Vec<u64> = target
-            .get_column(1)
-            .chunks_exact(8)
-            .map(|bytes| u64::from_ne_bytes(bytes.try_into().unwrap()))
+            .get_column_chunks(1)
+            .map(|slot| u64::from_ne_bytes(slot.try_into().unwrap()))
             .collect();
         assert_eq!(values, vec![1u64 << 32, 2 << 32, 3 << 32]);
 

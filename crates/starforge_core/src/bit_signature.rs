@@ -79,20 +79,15 @@ impl BitSignature {
     /// Returns `true` if every bit set in `other` is also set in `self`.
     pub fn contains(&self, other: &Self) -> bool {
         let min_len = self.0.len().min(other.0.len());
-        let subset_in_common = self.0[..min_len]
-            .iter()
-            .zip(&other.0[..min_len])
-            .all(|(a, b)| a & b == *b);
+        let subset_in_common =
+            self.0[..min_len].iter().zip(&other.0[..min_len]).all(|(a, b)| a & b == *b);
         subset_in_common && other.0[min_len..].iter().all(|word| *word == 0)
     }
 
     /// Returns `true` if `self` and `other` have at least one bit in common.
     pub fn intersects(&self, other: &Self) -> bool {
         let min_len = self.0.len().min(other.0.len());
-        self.0[..min_len]
-            .iter()
-            .zip(&other.0[..min_len])
-            .any(|(a, b)| a & b != 0)
+        self.0[..min_len].iter().zip(&other.0[..min_len]).any(|(a, b)| a & b != 0)
     }
 
     /// Sets every bit that is set in `other`, growing `self` if needed.
@@ -124,11 +119,7 @@ impl BitSignature {
     /// Returns a new signature containing the intersection of `self` and `other`.
     pub fn intersection(&self, other: &Self) -> Self {
         let min_len = self.0.len().min(other.0.len());
-        let words = self.0[..min_len]
-            .iter()
-            .zip(&other.0[..min_len])
-            .map(|(a, b)| a & b)
-            .collect();
+        let words = self.0[..min_len].iter().zip(&other.0[..min_len]).map(|(a, b)| a & b).collect();
         Self(words)
     }
 
@@ -161,11 +152,7 @@ impl Hash for BitSignature {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Hash only up to the last non-zero word so that equal signatures (which
         // may differ in trailing zero words) always hash identically.
-        let end = self
-            .0
-            .iter()
-            .rposition(|word| *word != 0)
-            .map_or(0, |i| i + 1);
+        let end = self.0.iter().rposition(|word| *word != 0).map_or(0, |i| i + 1);
         for word in &self.0[..end] {
             word.hash(state);
         }

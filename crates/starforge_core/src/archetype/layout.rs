@@ -114,12 +114,8 @@ impl ArchetypeChunkLayout {
         // fitting capacity is a plain division.
         let buffer_align = Self::buffer_align_for(meta);
         let aligned_size = buffer_size - buffer_size % buffer_align;
-        let per_entity = meta
-            .columns()
-            .iter()
-            .map(|c| c.type_meta.size)
-            .sum::<usize>()
-            + Self::ENTITY_KEY_SIZE;
+        let per_entity =
+            meta.columns().iter().map(|c| c.type_meta.size).sum::<usize>() + Self::ENTITY_KEY_SIZE;
         let capacity = aligned_size / per_entity;
 
         // Columns at the head, entity keys at the tail; any slack sits between them.

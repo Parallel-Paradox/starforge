@@ -2,35 +2,56 @@ mod chunk;
 mod layout;
 mod meta;
 
-use std::rc::Rc;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub use chunk::ArchetypeChunk;
 pub use layout::{ArchetypeChunkLayout, ArchetypeChunkLayoutError};
 pub use meta::{ArchetypeMeta, ArchetypeMetaError, ColumnEntry};
 
+/// A family of chunks sharing one [`ArchetypeMeta`] and one component layout, storing
+/// entities of the same component set in contiguous buffers.
+///
+/// Entities are spread across [`ArchetypeChunk`]s; capacity grows on demand by doubling
+/// the first chunk or appending new chunks, see [`Archetype::reserve`].
 pub struct Archetype {
-    pub meta: Rc<ArchetypeMeta>,
+    /// The frozen metadata describing the component columns shared by every chunk.
+    pub meta: Arc<ArchetypeMeta>,
     chunks: Vec<ArchetypeChunk>,
     len: usize,
 }
 
 impl Archetype {
+    /// Number of live entities across all chunks.
     pub fn len(&self) -> usize {
         self.len
     }
 
-    pub fn new(meta: Rc<ArchetypeMeta>) -> Result<Self, ArchetypeError> {
+    /// Creates an empty archetype backed by a single chunk whose layout holds exactly
+    /// one entity; the chunk grows on demand via [`Archetype::reserve`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchetypeError::ArchetypeTooLarge`] if a single entity's bytes (all columns
+    /// plus the entity key) exceed [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
+    pub fn new(meta: Arc<ArchetypeMeta>) -> Result<Self, ArchetypeError> {
         let layout = ArchetypeChunkLayout::with_capacity(&meta, 1).map_err(|e| match e {
             ArchetypeChunkLayoutError::BufferTooLarge { buffer_size, max } => {
                 ArchetypeError::ArchetypeTooLarge { per_entity_size: buffer_size, max }
             }
         })?;
-        let layout = Rc::new(layout);
+        let layout = Arc::new(layout);
         let chunk = ArchetypeChunk::new(meta.clone(), layout);
         Ok(Self { meta, chunks: vec![chunk], len: 0 })
     }
 
+    /// Reserves capacity for at least `additional` more entities, so subsequent insertions
+    /// do not reallocate.
+    ///
+    /// While only the first chunk exists, its capacity is doubled (capped at the maximum
+    /// buffer size) and the live data is relocated into the grown chunk; once the first
+    /// chunk can no longer grow, new chunks sharing its layout are appended until the
+    /// requested capacity is covered.
     pub fn reserve(&mut self, additional: usize) {
         // SAFETY: `self.chunks` is guaranteed to be non-empty.
         let last = self.chunks.len() - 1;
@@ -56,8 +77,7 @@ impl Archetype {
         let free = capacity - self.chunks[last].len();
         let mut remaining = additional.saturating_sub(free);
         while remaining > 0 {
-            self.chunks
-                .push(ArchetypeChunk::new(self.meta.clone(), layout.clone()));
+            self.chunks.push(ArchetypeChunk::new(self.meta.clone(), layout.clone()));
             remaining = remaining.saturating_sub(capacity);
         }
     }
@@ -91,17 +111,17 @@ impl Archetype {
         meta: &ArchetypeMeta,
         capacity: usize,
         required: usize,
-    ) -> Rc<ArchetypeChunkLayout> {
+    ) -> Arc<ArchetypeChunkLayout> {
         let mut capacity = capacity.saturating_mul(2);
         loop {
             match ArchetypeChunkLayout::with_capacity(meta, capacity) {
-                Ok(layout) if layout.capacity() >= required => return Rc::new(layout),
+                Ok(layout) if layout.capacity() >= required => return Arc::new(layout),
                 Ok(layout) => capacity = layout.capacity().saturating_mul(2),
                 // Doubling exceeded the maximum buffer size: reset to the largest
                 // layout that fits. `Archetype::new` guarantees a single entity fits,
                 // so capacity must be at least 1.
                 Err(ArchetypeChunkLayoutError::BufferTooLarge { .. }) => {
-                    return Rc::new(
+                    return Arc::new(
                         ArchetypeChunkLayout::with_buffer_size(
                             meta,
                             ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE,
@@ -114,8 +134,10 @@ impl Archetype {
     }
 }
 
+/// Errors returned when building an [`Archetype`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ArchetypeError {
+    /// A single entity's bytes exceed the maximum buffer size.
     #[error("Size per entity ({per_entity_size}) exceeds maximum allowed ({max})")]
     ArchetypeTooLarge { per_entity_size: usize, max: usize },
 }
@@ -123,7 +145,6 @@ pub enum ArchetypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -160,9 +181,7 @@ mod tests {
     impl Drop for Tracked {
         fn drop(&mut self) {
             self.tracker.count.fetch_add(1, Ordering::SeqCst);
-            self.tracker
-                .sum
-                .fetch_add(self.value as usize, Ordering::SeqCst);
+            self.tracker.sum.fetch_add(self.value as usize, Ordering::SeqCst);
         }
     }
 
@@ -247,20 +266,29 @@ mod tests {
     #[test]
     fn reserve_grows_first_chunk_and_preserves_data() {
         let ctx = TestContext::mock();
-        let mut archetype = Archetype::new(Rc::new(ctx.meta())).unwrap();
+        let mut archetype = Archetype::new(Arc::new(ctx.meta())).unwrap();
         assert_eq!(archetype.chunks.len(), 1);
         assert_eq!(archetype.chunks[0].layout.capacity(), 1);
 
-        // Place a single entity directly into the chunk.
+        // The chunked accessors cover exactly the live rows, so publish `set_len(1)`
+        // before writing through them. Both columns are trivial, so a byte copy into
+        // each component-sized slot is safe; the key is a plain integer struct whose
+        // slot needs no drop glue.
         unsafe {
             archetype.chunks[0].set_len(1);
-            let keys = archetype.chunks[0].get_entity_keys_mut_ptr();
-            std::ptr::write(keys, EntityKey { index: 7, generation: 3, instance_id: 9 });
-            let column_0 = archetype.chunks[0].get_column_mut_ptr(0) as *mut u64;
-            std::ptr::write(column_0, 0x1122_3344_5566_7788);
-            let column_1 = archetype.chunks[0].get_column_mut_ptr(1) as *mut u32;
-            std::ptr::write(column_1, 0xDEAD_BEEF);
         }
+        archetype.chunks[0].get_entity_keys_mut()[0] =
+            EntityKey { index: 7, generation: 3, instance_id: 9 };
+        archetype.chunks[0]
+            .get_column_chunks_mut(0)
+            .next()
+            .unwrap()
+            .copy_from_slice(&0x1122_3344_5566_7788u64.to_ne_bytes());
+        archetype.chunks[0]
+            .get_column_chunks_mut(1)
+            .next()
+            .unwrap()
+            .copy_from_slice(&0xDEAD_BEEFu32.to_ne_bytes());
 
         // 1 + 10 = 11 entities needed: doubling goes 1 -> 2 -> 4 -> 8 -> 16.
         archetype.reserve(10);
@@ -276,13 +304,19 @@ mod tests {
         assert_eq!(keys[0].generation, 3);
         assert_eq!(keys[0].instance_id, 9);
 
-        let column_0 = archetype.chunks[0].get_column(0);
-        assert_eq!(column_0.len(), 8);
-        assert_eq!(u64::from_ne_bytes(column_0[0..8].try_into().unwrap()), 0x1122_3344_5566_7788);
-
-        let column_1 = archetype.chunks[0].get_column(1);
-        assert_eq!(column_1.len(), 4);
-        assert_eq!(u32::from_ne_bytes(column_1[0..4].try_into().unwrap()), 0xDEAD_BEEF);
+        // Each column reads back through `get_column_chunks` as one component-sized slot.
+        assert_eq!(
+            u64::from_ne_bytes(
+                archetype.chunks[0].get_column_chunks(0).next().unwrap().try_into().unwrap()
+            ),
+            0x1122_3344_5566_7788
+        );
+        assert_eq!(
+            u32::from_ne_bytes(
+                archetype.chunks[0].get_column_chunks(1).next().unwrap().try_into().unwrap()
+            ),
+            0xDEAD_BEEF
+        );
     }
 
     /// Once the first chunk reaches the maximum buffer size, `reserve` appends new
@@ -294,7 +328,7 @@ mod tests {
         let ctx = TestContext::mock_wide();
         let meta = ctx.meta_with(&[TypeId::of_script(1)]);
 
-        let mut archetype = Archetype::new(Rc::new(meta)).unwrap();
+        let mut archetype = Archetype::new(Arc::new(meta)).unwrap();
         // 100 entities needed: the first chunk grows to max (capacity 2) and then 49
         // more chunks are appended to cover the remaining 98.
         archetype.reserve(100);
@@ -303,7 +337,7 @@ mod tests {
         for chunk in &archetype.chunks {
             assert_eq!(chunk.layout.capacity(), 2);
         }
-        assert!(Rc::ptr_eq(&archetype.chunks[0].layout, &archetype.chunks[49].layout));
+        assert!(Arc::ptr_eq(&archetype.chunks[0].layout, &archetype.chunks[49].layout));
     }
 
     /// Relocating a chunk must not drop the moved non-trivial components: the old
@@ -316,13 +350,22 @@ mod tests {
         let ctx = TestContext::mock_tracked();
         let meta = ctx.meta_with(&[TypeId::of::<Tracked>()]);
 
-        let mut archetype = Archetype::new(Rc::new(meta)).unwrap();
+        let mut archetype = Archetype::new(Arc::new(meta)).unwrap();
+        // Publish the row first: `get_column_chunks_mut` covers only live rows. The
+        // column is non-trivial, so `ptr::write` moves the value into the
+        // uninitialized slot without dropping garbage.
         unsafe {
             archetype.chunks[0].set_len(1);
-            let keys = archetype.chunks[0].get_entity_keys_mut_ptr();
-            std::ptr::write(keys, EntityKey { index: 0, generation: 0, instance_id: 0 });
-            let column = archetype.chunks[0].get_column_mut_ptr(0) as *mut Tracked;
-            std::ptr::write(column, Tracked { value: 42, tracker: tracker.clone() });
+        }
+        archetype.chunks[0].get_entity_keys_mut()[0] =
+            EntityKey { index: 0, generation: 0, instance_id: 0 };
+        let slot = archetype.chunks[0].get_column_chunks_mut(0).next().unwrap();
+        // SAFETY: the slot is the single live, uninitialized `Tracked` slot.
+        unsafe {
+            std::ptr::write(
+                slot.as_mut_ptr().cast::<Tracked>(),
+                Tracked { value: 42, tracker: tracker.clone() },
+            );
         }
 
         archetype.reserve(10);
