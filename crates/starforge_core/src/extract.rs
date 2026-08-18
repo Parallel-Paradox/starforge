@@ -72,3 +72,35 @@ macro_rules! for_tuples {
     // Base case: `extend` is exhausted, stop recursing.
     (@step $rule:ident, [$($p:ident),*], [$($acc:ident),*],) => {};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestExtract;
+
+    impl CoreExtract for TestExtract {
+        fn extract(_core: &mut Core) -> Self {
+            Self
+        }
+    }
+
+    #[test]
+    fn extract_tuple() {
+        // (TestExtract,) must implement CoreExtract.
+        fn assert_impl<T: CoreExtract>() {}
+        assert_impl::<(TestExtract,)>();
+
+        // (TestExtract, u8) must NOT implement CoreExtract: `u8` has no
+        // CoreExtract impl, so the tuple impl must not apply.
+        // `some_item` is only ambiguous if the tuple implements CoreExtract,
+        // in which case this test fails to compile.
+        trait AmbiguousIfImpl<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+        struct Invalid;
+        impl<T: ?Sized + CoreExtract> AmbiguousIfImpl<Invalid> for T {}
+        let _ = <(TestExtract, u8) as AmbiguousIfImpl<_>>::some_item;
+    }
+}
