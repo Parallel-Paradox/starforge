@@ -1,12 +1,9 @@
+use crate::prelude::*;
+
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use thiserror::Error;
-
-use crate::{
-    component::{ComponentKey, ComponentMeta, ComponentRegistry, ComponentRegistryError},
-    types::{TypeId, TypeKey, TypeMeta, TypeRegistry, TypeRegistryError},
-};
 
 /// A single column of an archetype: the component type stored, referenced both by its
 /// `TypeKey` (for layout metadata) and its `ComponentKey` (for storage metadata).
@@ -108,11 +105,11 @@ impl ArchetypeMeta {
 pub enum ArchetypeMetaError {
     /// A column's `TypeKey` does not resolve in the `TypeRegistry`.
     #[error(transparent)]
-    Type(#[from] TypeRegistryError),
+    Type(#[from] crate::types::Error),
 
     /// A column's `ComponentKey` does not resolve in the `ComponentRegistry`.
     #[error(transparent)]
-    Component(#[from] ComponentRegistryError),
+    Component(#[from] crate::component::Error),
 
     /// A column's type key and component key resolve to different underlying types.
     #[error("column type key resolves to {type_id:?} but component key resolves to {comp_id:?}")]
