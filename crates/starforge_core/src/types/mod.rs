@@ -4,4 +4,4 @@ mod registry;
 
 pub use id::TypeId;
 pub use meta::TypeMeta;
-pub use registry::{TypeKey, TypeRegistry, Error};
+pub use registry::{Error, TypeKey, TypeRegistry};

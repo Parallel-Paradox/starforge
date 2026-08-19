@@ -134,16 +134,37 @@ impl ArchetypeRegistry {
         self.key_to_archetype(key)
     }
 
+    /// Looks up the mutable [`Archetype`] registered for `signature`.
+    pub fn sign_to_archetype_mut(
+        &mut self,
+        signature: &ArchetypeSignature,
+    ) -> Result<&mut Archetype, Error> {
+        let key = *self.sign_to_key(signature)?;
+        self.key_to_archetype_mut(&key)
+    }
+
     /// Resolves `key` to its [`Archetype`], validating that it belongs to this registry
     /// and that its generation is still current.
     pub fn key_to_archetype(&self, key: &ArchetypeKey) -> Result<&Archetype, Error> {
+        let index = self.key_to_index(key)?;
+        Ok(&self.archetype_entries[index].1)
+    }
+
+    /// Resolves `key` to a mutable [`Archetype`], validating that it belongs to this registry
+    /// and that its generation is still current.
+    pub fn key_to_archetype_mut(&mut self, key: &ArchetypeKey) -> Result<&mut Archetype, Error> {
+        let index = self.key_to_index(key)?;
+        Ok(&mut self.archetype_entries[index].1)
+    }
+
+    fn key_to_index(&self, key: &ArchetypeKey) -> Result<usize, Error> {
         if key.instance_id != self.instance_id {
             return Err(Error::ForeignInstance {
                 expected: self.instance_id,
                 actual: key.instance_id,
             });
         }
-        let (stored_key, archetype) =
+        let (stored_key, _) =
             self.archetype_entries.get(key.index).ok_or(Error::IndexOutOfBounds {
                 index: key.index,
                 bounds: self.archetype_entries.len(),
@@ -154,7 +175,7 @@ impl ArchetypeRegistry {
                 actual: key.generation,
             });
         }
-        Ok(archetype)
+        Ok(key.index)
     }
 }
 
@@ -283,5 +304,15 @@ mod tests {
             registry.sign_to_archetype(&signature),
             Err(Error::UnknownSignature { signature: actual }) if actual == signature
         ));
+    }
+
+    #[test]
+    fn mutable_lookups_resolve_registered_archetype() {
+        let mut registry = ArchetypeRegistry::default();
+        let signature = signature(1);
+        let key = registry.register(signature.clone(), archetype());
+
+        assert!(registry.sign_to_archetype_mut(&signature).is_ok());
+        assert!(registry.key_to_archetype_mut(&key).is_ok());
     }
 }
