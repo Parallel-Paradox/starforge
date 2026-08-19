@@ -1,4 +1,4 @@
-use crate::{Core, extract::CoreExtract};
+use crate::{Core, CoreExtract};
 
 pub fn into_system<F, T: CoreExtract>(f: F) -> impl Fn(&mut Core)
 where

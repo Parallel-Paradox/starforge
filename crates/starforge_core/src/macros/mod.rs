@@ -1,8 +1,6 @@
-use crate::{Core, for_tuples};
+use crate::{Core, CoreExtract, for_tuples};
 
-pub trait CoreExtract {
-    fn extract(core: &mut Core) -> Self;
-}
+pub use starforge_core_macro::*;
 
 /// Implement for tuples of types that implement [`CoreExtract`].
 #[macro_export]
