@@ -48,7 +48,7 @@ impl ArchetypeMeta {
         columns: Vec<ColumnEntry>,
         type_registry: &TypeRegistry,
         comp_registry: &ComponentRegistry,
-    ) -> Result<Self, ArchetypeMetaError> {
+    ) -> Result<Self, Error> {
         // Resolve each column to its layout metadata and verify its type/component keys agree.
         let mut keyed: Vec<((Reverse<usize>, Reverse<usize>, usize), TypeId, ColumnEntry)> =
             Vec::with_capacity(columns.len());
@@ -56,10 +56,7 @@ impl ArchetypeMeta {
             let type_meta = type_registry.key_to_meta(&entry.type_key)?;
             let comp_meta = comp_registry.key_to_meta(&entry.comp_key)?;
             if type_meta.id != comp_meta.id {
-                return Err(ArchetypeMetaError::KeyMismatch {
-                    type_id: type_meta.id,
-                    comp_id: comp_meta.id,
-                });
+                return Err(Error::KeyMismatch { type_id: type_meta.id, comp_id: comp_meta.id });
             }
             // Freeze the resolved metadata into the entry (clone out of the registries).
             entry.type_meta = type_meta.clone();
@@ -102,7 +99,7 @@ impl ArchetypeMeta {
 
 /// Errors returned when building an [`ArchetypeMeta`].
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum ArchetypeMetaError {
+pub enum Error {
     /// A column's `TypeKey` does not resolve in the `TypeRegistry`.
     #[error(transparent)]
     Type(#[from] crate::types::Error),
@@ -287,7 +284,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ArchetypeMetaError::KeyMismatch { type_id, comp_id })
+            Err(Error::KeyMismatch { type_id, comp_id })
                 if type_id == TypeId::of_script(1) && comp_id == TypeId::of_script(2)
         ));
     }
@@ -308,7 +305,7 @@ mod tests {
             &ctx.comp_reg,
         );
 
-        assert!(matches!(result, Err(ArchetypeMetaError::Type(_))));
+        assert!(matches!(result, Err(Error::Type(_))));
     }
 
     #[test]
@@ -327,6 +324,6 @@ mod tests {
             &ctx.comp_reg,
         );
 
-        assert!(matches!(result, Err(ArchetypeMetaError::Component(_))));
+        assert!(matches!(result, Err(Error::Component(_))));
     }
 }

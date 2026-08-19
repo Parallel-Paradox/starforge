@@ -7,6 +7,7 @@ pub mod tool;
 pub mod types;
 
 pub mod prelude {
+    pub use crate::archetype::{Archetype, ArchetypeKey, ArchetypeRegistry};
     pub use crate::component::{
         Component, ComponentKey, ComponentKind, ComponentMeta, ComponentRegistry,
     };

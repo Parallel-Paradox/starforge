@@ -61,10 +61,7 @@ impl ArchetypeChunkLayout {
     ///
     /// Returns [`ArchetypeChunkLayoutError::BufferTooLarge`] if the computed buffer size
     /// exceeds [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
-    pub fn with_capacity(
-        meta: &ArchetypeMeta,
-        capacity: usize,
-    ) -> Result<Self, ArchetypeChunkLayoutError> {
+    pub fn with_capacity(meta: &ArchetypeMeta, capacity: usize) -> Result<Self, Error> {
         let mut columns_size = 0;
         let mut column_offsets = Vec::with_capacity(meta.columns().len());
         for column in meta.columns() {
@@ -78,10 +75,7 @@ impl ArchetypeChunkLayout {
         let entity_key_offset = buffer_size - entity_key_size;
 
         if buffer_size > Self::MAX_BUFFER_SIZE_BYTE {
-            return Err(ArchetypeChunkLayoutError::BufferTooLarge {
-                buffer_size,
-                max: Self::MAX_BUFFER_SIZE_BYTE,
-            });
+            return Err(Error::BufferTooLarge { buffer_size, max: Self::MAX_BUFFER_SIZE_BYTE });
         }
 
         Ok(Self { capacity, buffer_size, buffer_align, column_offsets, entity_key_offset })
@@ -98,15 +92,9 @@ impl ArchetypeChunkLayout {
     ///
     /// Returns [`ArchetypeChunkLayoutError::BufferTooLarge`] if `buffer_size` exceeds
     /// [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
-    pub fn with_buffer_size(
-        meta: &ArchetypeMeta,
-        buffer_size: usize,
-    ) -> Result<Self, ArchetypeChunkLayoutError> {
+    pub fn with_buffer_size(meta: &ArchetypeMeta, buffer_size: usize) -> Result<Self, Error> {
         if buffer_size > Self::MAX_BUFFER_SIZE_BYTE {
-            return Err(ArchetypeChunkLayoutError::BufferTooLarge {
-                buffer_size,
-                max: Self::MAX_BUFFER_SIZE_BYTE,
-            });
+            return Err(Error::BufferTooLarge { buffer_size, max: Self::MAX_BUFFER_SIZE_BYTE });
         }
 
         // Entity keys end at the budget rounded down to the buffer's alignment, so the
@@ -142,7 +130,7 @@ impl ArchetypeChunkLayout {
 
 /// Errors returned when building an [`ArchetypeChunkLayout`].
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum ArchetypeChunkLayoutError {
+pub enum Error {
     /// The computed buffer size exceeds [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
     #[error("buffer size {buffer_size} exceeds the maximum of {max} bytes")]
     BufferTooLarge { buffer_size: usize, max: usize },
@@ -228,7 +216,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(ArchetypeChunkLayoutError::BufferTooLarge {
+            Err(Error::BufferTooLarge {
                 buffer_size,
                 max: ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE,
             }) if buffer_size > ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE
@@ -270,6 +258,6 @@ mod tests {
             ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE + 1,
         );
 
-        assert!(matches!(result, Err(ArchetypeChunkLayoutError::BufferTooLarge { .. })));
+        assert!(matches!(result, Err(Error::BufferTooLarge { .. })));
     }
 }

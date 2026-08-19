@@ -1,13 +1,15 @@
 mod chunk;
 mod layout;
 mod meta;
+mod registry;
 
 use std::sync::Arc;
 use thiserror::Error;
 
 pub use chunk::ArchetypeChunk;
-pub use layout::{ArchetypeChunkLayout, ArchetypeChunkLayoutError};
-pub use meta::{ArchetypeMeta, ArchetypeMetaError, ColumnEntry};
+pub use layout::{ArchetypeChunkLayout, Error as LayoutError};
+pub use meta::{ArchetypeMeta, ColumnEntry, Error as MetaError};
+pub use registry::{ArchetypeKey, ArchetypeRegistry, ArchetypeSignature, Error as RegistryError};
 
 /// A family of chunks sharing one [`ArchetypeMeta`] and one component layout, storing
 /// entities of the same component set in contiguous buffers.
@@ -36,7 +38,7 @@ impl Archetype {
     /// plus the entity key) exceed [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
     pub fn new(meta: Arc<ArchetypeMeta>) -> Result<Self, ArchetypeError> {
         let layout = ArchetypeChunkLayout::with_capacity(&meta, 1).map_err(|e| match e {
-            ArchetypeChunkLayoutError::BufferTooLarge { buffer_size, max } => {
+            LayoutError::BufferTooLarge { buffer_size, max } => {
                 ArchetypeError::ArchetypeTooLarge { per_entity_size: buffer_size, max }
             }
         })?;
@@ -120,7 +122,7 @@ impl Archetype {
                 // Doubling exceeded the maximum buffer size: reset to the largest
                 // layout that fits. `Archetype::new` guarantees a single entity fits,
                 // so capacity must be at least 1.
-                Err(ArchetypeChunkLayoutError::BufferTooLarge { .. }) => {
+                Err(LayoutError::BufferTooLarge { .. }) => {
                     return Arc::new(
                         ArchetypeChunkLayout::with_buffer_size(
                             meta,
