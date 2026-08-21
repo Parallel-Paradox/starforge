@@ -7,14 +7,13 @@ use std::{
 
 use crate::{
     archetype::{ArchetypeChunkLayout, ArchetypeMeta},
-    component::ComponentKind,
-    entity::EntityKey,
+    prelude::*,
 };
 
 pub struct ArchetypeChunk {
     /// The metadata describing the archetype of this chunk, including its columns and their types.
     pub meta: Arc<ArchetypeMeta>,
-    /// The layout of the chunk's buffer, including offsets and sizes of columns and entity keys.
+    /// The layout of the chunk's buffer, including offsets and sizes of component columns.
     pub layout: Arc<ArchetypeChunkLayout>,
     buf_ptr: NonNull<u8>,
     len: usize,
@@ -28,7 +27,7 @@ impl ArchetypeChunk {
     pub fn new(meta: Arc<ArchetypeMeta>, layout: Arc<ArchetypeChunkLayout>) -> Self {
         Self::assert_meta_matches_layout(&meta, &layout);
         let buf_ptr = if layout.buffer_size() == 0 {
-            NonNull::<EntityKey>::dangling().cast()
+            NonNull::<u8>::dangling()
         } else {
             let allocation_layout =
                 Layout::from_size_align(layout.buffer_size(), layout.buffer_align())
@@ -95,53 +94,6 @@ impl ArchetypeChunk {
     pub unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.layout.capacity());
         self.len = len;
-    }
-
-    /// Returns the valid entity keys: the first `len` entries of the entity key array.
-    ///
-    /// The slice has length `self.len()`; slots beyond `len` (up to `capacity`) hold no
-    /// valid entity.
-    pub fn get_entity_keys(&self) -> &[EntityKey] {
-        // SAFETY: the array starts at `entity_key_offset` and holds `capacity` elements;
-        // `len <= capacity` keeps the `len`-element slice within the buffer.
-        unsafe {
-            let keys =
-                self.buf_ptr.as_ptr().add(self.layout.entity_key_offset()) as *const EntityKey;
-            std::slice::from_raw_parts(keys, self.len)
-        }
-    }
-
-    /// Returns the valid entity keys as a mutable slice: the first `len` entries of the
-    /// entity key array.
-    ///
-    /// The slice has length `self.len()`; slots beyond `len` (up to `capacity`) hold no
-    /// valid entity. To insert new keys, place them with [`Self::get_entity_keys_mut_ptr`]
-    /// and advance `self.len` via [`Self::set_len`].
-    pub fn get_entity_keys_mut(&mut self) -> &mut [EntityKey] {
-        // SAFETY: the array starts at `entity_key_offset` and holds `capacity` elements;
-        // `len <= capacity` keeps the `len`-element slice within the buffer.
-        unsafe {
-            let keys = self.buf_ptr.as_ptr().add(self.layout.entity_key_offset()) as *mut EntityKey;
-            std::slice::from_raw_parts_mut(keys, self.len)
-        }
-    }
-
-    /// Returns a non-null pointer to the start of the entity key array, for placing new keys.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure no aliasing references exist and must not read or
-    /// overwrite slots beyond `self.len` by assignment: they are uninitialized. Convert the
-    /// pointer with [`NonNull::as_ptr`] for raw pointer operations (write or copy), and advance
-    /// `self.len` via [`Self::set_len`] so the safe getters see them.
-    pub unsafe fn get_entity_keys_mut_ptr(&mut self) -> NonNull<EntityKey> {
-        // SAFETY: `buf_ptr` is a `buffer_size`-byte, `buffer_align`-aligned allocation
-        // and the array of `capacity` elements fits entirely inside it at `entity_key_offset`.
-        unsafe {
-            NonNull::new_unchecked(
-                self.buf_ptr.as_ptr().add(self.layout.entity_key_offset()).cast::<EntityKey>(),
-            )
-        }
     }
 
     /// Returns the bytes of the `index`-th column covering the valid entities: the first
@@ -252,17 +204,6 @@ impl ArchetypeChunk {
             "target chunk is smaller than the source's live count"
         );
 
-        // SAFETY: both pointers are the starts of the entity key arrays in their own
-        // allocations; `self.len <= other.layout.capacity()` keeps the copy within the
-        // destination array.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                self.buf_ptr.as_ptr().add(self.layout.entity_key_offset()) as *const EntityKey,
-                other.buf_ptr.as_ptr().add(other.layout.entity_key_offset()) as *mut EntityKey,
-                self.len,
-            );
-        }
-
         for (index, column) in self.meta.columns().iter().enumerate() {
             let bytes = self.len * column.stride;
             // SAFETY: both pointers are the starts of the `index`-th column array in
@@ -284,9 +225,6 @@ impl ArchetypeChunk {
     /// Debug-only invariant check: panics if `layout` is inconsistent with `meta`, i.e. could
     /// not have been built from it. Expands to nothing in release builds.
     fn assert_meta_matches_layout(meta: &ArchetypeMeta, layout: &ArchetypeChunkLayout) {
-        let entity_key_align = std::mem::align_of::<EntityKey>();
-        let entity_key_size = std::mem::size_of::<EntityKey>();
-
         debug_assert_eq!(
             meta.columns().len(),
             layout.column_offsets().len(),
@@ -303,45 +241,26 @@ impl ArchetypeChunk {
             columns_size += column.stride * layout.capacity();
         }
 
-        // Buffer alignment is the maximum of the entity key and the first column's alignment.
-        let expected_align = meta
-            .columns()
-            .first()
-            .map(|column| column.align.max(entity_key_align))
-            .unwrap_or(entity_key_align);
+        // Buffer alignment follows the first (largest-aligned) column, or 1 when empty.
+        let expected_align = meta.columns().first().map(|column| column.align).unwrap_or(1);
         debug_assert_eq!(
             layout.buffer_align(),
             expected_align,
             "meta and layout disagree on the buffer alignment"
-        );
-
-        // Entity keys end at the alignment-rounded buffer size, clear of the columns.
-        let keys_end = layout.entity_key_offset() + entity_key_size * layout.capacity();
-        let aligned_size = layout.buffer_size() - layout.buffer_size() % layout.buffer_align();
-        debug_assert_eq!(
-            keys_end, aligned_size,
-            "entity key array does not end at the aligned boundary"
-        );
-        debug_assert!(
-            layout.entity_key_offset() >= columns_size,
-            "entity key array overlaps the column data"
         );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::macros::Component;
-    use crate::prelude::*;
-
     use super::*;
-    use crate::{
-        archetype::ColumnEntry,
-        component::{ComponentKind, ComponentMeta, ComponentRegistry},
-        types::{TypeId, TypeMeta, TypeRegistry},
+
+    use crate::{archetype::ColumnEntry, macros::Component};
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Test-local drop counters. Each test owns its own `Arc<Tracker>`, so tests never
     /// share mutable state and can run in parallel.
@@ -460,7 +379,7 @@ mod tests {
         }
     }
 
-    /// Places distinct patterns into all regions via the raw-pointer getters (covering
+    /// Places distinct patterns into all columns via the raw-pointer getters (covering
     /// the full capacity), then reads them back through the safe getters. Distinct
     /// patterns mean any offset error or region overlap corrupts a read-back.
     #[test]
@@ -474,14 +393,6 @@ mod tests {
         // Placement via the raw-pointer getters. The slots are uninitialized, hence
         // `ptr::write` rather than assignment.
         unsafe {
-            let keys = chunk.get_entity_keys_mut_ptr().as_ptr();
-            for i in 0..CAPACITY {
-                std::ptr::write(
-                    keys.add(i),
-                    EntityKey { index: i, generation: i as u32, instance_id: 1 },
-                );
-            }
-
             let column_0 = chunk.get_column_mut_ptr(0).as_ptr();
             for i in 0..CAPACITY * 8 {
                 std::ptr::write(column_0.add(i), (i * 7) as u8);
@@ -495,22 +406,6 @@ mod tests {
         }
 
         // Safe getters expose only the first `len` elements, matching the writes.
-        let keys = chunk.get_entity_keys();
-        assert_eq!(keys.len(), LEN);
-        for (i, key) in keys.iter().enumerate() {
-            assert_eq!(key.index, i);
-            assert_eq!(key.generation, i as u32);
-            assert_eq!(key.instance_id, 1);
-        }
-
-        // The safe mutable getters are writable and cover exactly the live elements.
-        {
-            let keys_mut = chunk.get_entity_keys_mut();
-            assert_eq!(keys_mut.len(), LEN);
-            keys_mut[0].instance_id = 2;
-        }
-        assert_eq!(chunk.get_entity_keys()[0].instance_id, 2);
-
         let column_0 = chunk.get_column(0);
         assert_eq!(column_0.len(), LEN * 8);
         for (i, byte) in column_0.iter().enumerate() {
@@ -526,32 +421,15 @@ mod tests {
         }
     }
 
-    /// An empty-metadata chunk holds only the entity key array; keys round-trip normally.
+    /// An empty-metadata chunk has no column views but can still track logical length.
     #[test]
-    fn empty_meta_keys_round_trip() {
+    fn empty_meta_tracks_len_without_columns() {
         let ctx = TestContext::mock();
         let meta = ArchetypeMeta::new(vec![], &ctx.type_reg, &ctx.comp_reg).unwrap();
         let mut chunk = ctx.chunk(meta, 8);
 
-        // Place three keys, then publish them with `set_len`.
-        unsafe {
-            let keys = chunk.get_entity_keys_mut_ptr().as_ptr();
-            for i in 0..3 {
-                std::ptr::write(
-                    keys.add(i),
-                    EntityKey { index: i, generation: 0, instance_id: i as u32 },
-                );
-            }
-            chunk.set_len(3);
-        }
-
-        let keys = chunk.get_entity_keys();
-        assert_eq!(keys.len(), 3);
-        for (i, key) in keys.iter().enumerate() {
-            assert_eq!(key.index, i);
-            assert_eq!(key.generation, 0);
-            assert_eq!(key.instance_id, i as u32);
-        }
+        unsafe { chunk.set_len(3) };
+        assert_eq!(chunk.len(), 3);
     }
 
     #[test]
@@ -559,7 +437,6 @@ mod tests {
         let ctx = TestContext::mock();
         let chunk = ctx.chunk(ctx.meta(), 0);
 
-        assert!(chunk.get_entity_keys().is_empty());
         assert!(chunk.get_column(0).is_empty());
     }
 
@@ -610,8 +487,8 @@ mod tests {
         assert_eq!(tracker.sum.load(Ordering::SeqCst), 10 + 20 + 30 + 40);
     }
 
-    /// `move_data_into` relocates the entity keys and every column's live elements into
-    /// the target chunk, resets the source's length, and hands the non-trivial
+    /// `move_data_into` relocates every column's live elements into the target chunk,
+    /// resets the source's length, and hands the non-trivial
     /// components over without dropping them twice: the source is emptied before it is
     /// dropped, so each component is dropped exactly once, from the target.
     #[test]
@@ -624,14 +501,6 @@ mod tests {
 
         // SAFETY: writes only into the source's slots.
         unsafe {
-            let keys = source.get_entity_keys_mut_ptr().as_ptr();
-            for i in 0..3 {
-                std::ptr::write(
-                    keys.add(i),
-                    EntityKey { index: 100 + i, generation: 7, instance_id: 3 },
-                );
-            }
-
             // The chunked-mut getters expose exactly the first `len` rows, so the rows
             // must be declared live before they can be filled through
             // `get_column_chunks_mut`.
@@ -658,13 +527,6 @@ mod tests {
         // The source is emptied; the target takes over the moved count.
         assert_eq!(source.len(), 0);
         assert_eq!(target.len(), 3);
-
-        // Keys and both columns survived the move.
-        for (i, key) in target.get_entity_keys().iter().enumerate() {
-            assert_eq!(key.index, 100 + i);
-            assert_eq!(key.generation, 7);
-            assert_eq!(key.instance_id, 3);
-        }
 
         // Read the non-trivial column back through `get_column_chunks`: one
         // component-sized slot per row.

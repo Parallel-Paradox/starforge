@@ -11,6 +11,8 @@ pub use layout::{ArchetypeChunkLayout, Error as LayoutError};
 pub use meta::{ArchetypeMeta, ColumnEntry, Error as MetaError};
 pub use registry::{ArchetypeKey, ArchetypeRegistry, ArchetypeSignature, Error as RegistryError};
 
+use crate::entity::EntityKey;
+
 /// A family of chunks sharing one [`ArchetypeMeta`] and one component layout, storing
 /// entities of the same component set in contiguous buffers.
 ///
@@ -20,13 +22,13 @@ pub struct Archetype {
     /// The frozen metadata describing the component columns shared by every chunk.
     pub meta: Arc<ArchetypeMeta>,
     chunks: Vec<ArchetypeChunk>,
-    len: usize,
+    entity_keys: Vec<EntityKey>,
 }
 
 impl Archetype {
     /// Number of live entities across all chunks.
     pub fn len(&self) -> usize {
-        self.len
+        self.entity_keys.len()
     }
 
     /// Creates an empty archetype backed by a single chunk whose layout holds exactly
@@ -34,8 +36,8 @@ impl Archetype {
     ///
     /// # Errors
     ///
-    /// Returns [`ArchetypeError::ArchetypeTooLarge`] if a single entity's bytes (all columns
-    /// plus the entity key) exceed [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
+    /// Returns [`ArchetypeError::ArchetypeTooLarge`] if a single entity's bytes (all columns)
+    /// exceed [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
     pub fn new(meta: Arc<ArchetypeMeta>) -> Result<Self, ArchetypeError> {
         let layout = ArchetypeChunkLayout::with_capacity(&meta, 1).map_err(|e| match e {
             LayoutError::BufferTooLarge { buffer_size, max } => {
@@ -44,7 +46,7 @@ impl Archetype {
         })?;
         let layout = Arc::new(layout);
         let chunk = ArchetypeChunk::new(meta.clone(), layout);
-        Ok(Self { meta, chunks: vec![chunk], len: 0 })
+        Ok(Self { meta, chunks: vec![chunk], entity_keys: Vec::new() })
     }
 
     /// Reserves capacity for at least `additional` more entities, so subsequent insertions
@@ -55,6 +57,9 @@ impl Archetype {
     /// chunk can no longer grow, new chunks sharing its layout are appended until the
     /// requested capacity is covered.
     pub fn reserve(&mut self, additional: usize) {
+        // Keep entity key storage growth in sync with chunk capacity planning.
+        self.entity_keys.reserve(additional);
+
         // SAFETY: `self.chunks` is guaranteed to be non-empty.
         let last = self.chunks.len() - 1;
 
@@ -150,14 +155,6 @@ mod tests {
     use crate::prelude::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use crate::{
-        archetype::ColumnEntry,
-        component::{ComponentKind, ComponentMeta, ComponentRegistry},
-        entity::EntityKey,
-        macros::Component,
-        types::{TypeId, TypeMeta, TypeRegistry},
-    };
 
     /// Test-local drop counters. Each test owns its own `Arc<Tracker>`, so tests never
     /// share mutable state and can run in parallel.
@@ -266,8 +263,8 @@ mod tests {
         }
     }
 
-    /// `reserve` on the first chunk doubles its capacity and relocates the live data
-    /// (entity keys and columns) into the new buffer.
+    /// `reserve` on the first chunk doubles its capacity and relocates the live
+    /// column data into the new buffer.
     #[test]
     fn reserve_grows_first_chunk_and_preserves_data() {
         let ctx = TestContext::mock();
@@ -277,13 +274,10 @@ mod tests {
 
         // The chunked accessors cover exactly the live rows, so publish `set_len(1)`
         // before writing through them. Both columns are trivial, so a byte copy into
-        // each component-sized slot is safe; the key is a plain integer struct whose
-        // slot needs no drop glue.
+        // each component-sized slot is safe.
         unsafe {
             archetype.chunks[0].set_len(1);
         }
-        archetype.chunks[0].get_entity_keys_mut()[0] =
-            EntityKey { index: 7, generation: 3, instance_id: 9 };
         archetype.chunks[0]
             .get_column_chunks_mut(0)
             .next()
@@ -302,14 +296,7 @@ mod tests {
         assert_eq!(archetype.chunks[0].layout.capacity(), 16);
         assert_eq!(archetype.chunks[0].len(), 1);
 
-        // The relocated data survived the move.
-        let keys = archetype.chunks[0].get_entity_keys();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].index, 7);
-        assert_eq!(keys[0].generation, 3);
-        assert_eq!(keys[0].instance_id, 9);
-
-        // Each column reads back through `get_column_chunks` as one component-sized slot.
+        // The relocated column data survived the move.
         assert_eq!(
             u64::from_ne_bytes(
                 archetype.chunks[0].get_column_chunks(0).next().unwrap().try_into().unwrap()
@@ -328,7 +315,7 @@ mod tests {
     /// chunks sharing that layout until there is enough room.
     #[test]
     fn reserve_appends_chunks_after_first_chunk_maxes_out() {
-        // A single 8000-byte column: per-entity = 8000 + entity key, so the maximum
+        // A single 8000-byte column: the maximum
         // buffer size holds only two entities.
         let ctx = TestContext::mock_wide();
         let meta = ctx.meta_with(&[TypeId::of_script(1)]);
@@ -362,8 +349,6 @@ mod tests {
         unsafe {
             archetype.chunks[0].set_len(1);
         }
-        archetype.chunks[0].get_entity_keys_mut()[0] =
-            EntityKey { index: 0, generation: 0, instance_id: 0 };
         let slot = archetype.chunks[0].get_column_chunks_mut(0).next().unwrap();
         // SAFETY: the slot is the single live, uninitialized `Tracked` slot.
         unsafe {
@@ -383,5 +368,16 @@ mod tests {
         // Dropped exactly once, not twice (the old buffer's length was zeroed).
         assert_eq!(tracker.count.load(Ordering::SeqCst), 1);
         assert_eq!(tracker.sum.load(Ordering::SeqCst), 42);
+    }
+
+    #[test]
+    fn reserve_grows_entity_keys_capacity() {
+        let ctx = TestContext::mock();
+        let mut archetype = Archetype::new(Arc::new(ctx.meta())).unwrap();
+        let before = archetype.entity_keys.capacity();
+
+        archetype.reserve(32);
+
+        assert!(archetype.entity_keys.capacity() >= before.saturating_add(32));
     }
 }

@@ -1,25 +1,19 @@
 use thiserror::Error;
 
-use crate::{archetype::ArchetypeMeta, entity::EntityKey};
+use crate::archetype::ArchetypeMeta;
 
 /// The byte layout of an archetype's chunk buffer.
-/// The buffer is a SOA (structure-of-arrays), the entity key array is placed at the tail.
+/// The buffer is a SOA (structure-of-arrays) containing component columns data.
 pub struct ArchetypeChunkLayout {
     capacity: usize,
     buffer_size: usize,
     buffer_align: usize,
     column_offsets: Vec<usize>,
-    entity_key_offset: usize,
 }
 
 impl ArchetypeChunkLayout {
     /// 16 KB
     pub const MAX_BUFFER_SIZE_BYTE: usize = 16 * 1024;
-
-    /// Alignment required by the entity key array.
-    const ENTITY_KEY_ALIGN: usize = std::mem::align_of::<EntityKey>();
-    /// Size of a single entity key.
-    const ENTITY_KEY_SIZE: usize = std::mem::size_of::<EntityKey>();
 
     /// Number of entities (and elements per column array) the buffer can hold.
     pub fn capacity(&self) -> usize {
@@ -31,8 +25,8 @@ impl ArchetypeChunkLayout {
         self.buffer_size
     }
 
-    /// Alignment of the buffer allocation: the maximum of the entity key's alignment and the
-    /// first (largest-aligned) column's alignment.
+    /// Alignment of the buffer allocation: the first (largest-aligned) column's alignment,
+    /// or 1 when the archetype has no columns.
     pub fn buffer_align(&self) -> usize {
         self.buffer_align
     }
@@ -42,20 +36,10 @@ impl ArchetypeChunkLayout {
         &self.column_offsets
     }
 
-    /// Byte offset of the entity key array from the start of the buffer.
-    ///
-    /// The array occupies the tail, ending at a `buffer_align`-aligned boundary; any padding
-    /// needed for alignment sits before it, between the last column and the keys.
-    pub fn entity_key_offset(&self) -> usize {
-        self.entity_key_offset
-    }
-
     /// Builds a layout sized to hold exactly `capacity` entities.
     ///
-    /// Columns are packed at the head of the buffer; the entity key array occupies the tail
-    /// and ends at the next `buffer_align`-aligned boundary, so the buffer size is that
-    /// aligned boundary. Any padding needed for the entity key array lands between the last
-    /// column and the entity keys — never inside a column array.
+    /// Columns are packed at the head of the buffer. The total byte size is rounded up to
+    /// `buffer_align`, so any slack appears at the tail after the last column array.
     ///
     /// # Errors
     ///
@@ -69,24 +53,23 @@ impl ArchetypeChunkLayout {
             columns_size += column.stride * capacity;
         }
 
-        let entity_key_size = Self::ENTITY_KEY_SIZE * capacity;
         let buffer_align = Self::buffer_align_for(meta);
-        let buffer_size = (columns_size + entity_key_size).next_multiple_of(buffer_align);
-        let entity_key_offset = buffer_size - entity_key_size;
+        let buffer_size = columns_size.next_multiple_of(buffer_align);
 
         if buffer_size > Self::MAX_BUFFER_SIZE_BYTE {
             return Err(Error::BufferTooLarge { buffer_size, max: Self::MAX_BUFFER_SIZE_BYTE });
         }
 
-        Ok(Self { capacity, buffer_size, buffer_align, column_offsets, entity_key_offset })
+        Ok(Self { capacity, buffer_size, buffer_align, column_offsets })
     }
 
     /// Builds a layout fitting within a `buffer_size`-byte budget, holding the largest
     /// capacity that fits.
     ///
     /// The recorded [`Self::buffer_size`] keeps the requested `buffer_size` exactly. For the
-    /// layout itself the budget is rounded down to the buffer's alignment and the entity
-    /// key array ends at that aligned boundary.
+    /// layout itself the budget is rounded down to the buffer's alignment. If the archetype
+    /// has no columns (`per_entity == 0`), capacity is treated as unbounded and reported as
+    /// `usize::MAX`.
     ///
     /// # Errors
     ///
@@ -97,34 +80,30 @@ impl ArchetypeChunkLayout {
             return Err(Error::BufferTooLarge { buffer_size, max: Self::MAX_BUFFER_SIZE_BYTE });
         }
 
-        // Entity keys end at the budget rounded down to the buffer's alignment, so the
-        // region before them holds a whole number of per-entity bytes and the largest
-        // fitting capacity is a plain division.
+        // Round down to a buffer-aligned budget and fit as many rows as possible.
         let buffer_align = Self::buffer_align_for(meta);
         let aligned_size = buffer_size - buffer_size % buffer_align;
-        let per_entity =
-            meta.columns().iter().map(|c| c.stride).sum::<usize>() + Self::ENTITY_KEY_SIZE;
-        let capacity = aligned_size / per_entity;
+        let per_entity = meta.columns().iter().map(|c| c.stride).sum::<usize>();
+        let capacity = if per_entity == 0 {
+            usize::MAX
+        } else {
+            aligned_size / per_entity
+        };
 
-        // Columns at the head, entity keys at the tail; any slack sits between them.
+        // Columns are tightly packed at the head; slack (if any) remains at the tail.
         let mut columns_size = 0;
         let mut column_offsets = Vec::with_capacity(meta.columns().len());
         for column in meta.columns() {
             column_offsets.push(columns_size);
             columns_size += column.stride * capacity;
         }
-        let entity_key_offset = aligned_size - Self::ENTITY_KEY_SIZE * capacity;
 
-        Ok(Self { capacity, buffer_size, buffer_align, column_offsets, entity_key_offset })
+        Ok(Self { capacity, buffer_size, buffer_align, column_offsets })
     }
 
-    /// Alignment of the buffer allocation: the entity key's alignment, raised to the first
-    /// column's alignment when the archetype has columns.
+    /// Alignment of the buffer allocation: the first column's alignment, or 1 when empty.
     fn buffer_align_for(meta: &ArchetypeMeta) -> usize {
-        meta.columns()
-            .first()
-            .map(|column| column.align.max(Self::ENTITY_KEY_ALIGN))
-            .unwrap_or(Self::ENTITY_KEY_ALIGN)
+        meta.columns().first().map(|entry| entry.align).unwrap_or(1)
     }
 }
 
@@ -155,10 +134,6 @@ mod tests {
             TypeMeta::new(TypeId::of_script(2), 4, 4, TypeName::of_script("column_1")),
         ]
     }
-    /// Size and alignment of the entity key array element.
-    const ENTITY_KEY_SIZE: usize = std::mem::size_of::<EntityKey>();
-    const ENTITY_KEY_ALIGN: usize = std::mem::align_of::<EntityKey>();
-
     struct TestContext {
         type_reg: TypeRegistry,
         comp_reg: ComponentRegistry,
@@ -205,17 +180,15 @@ mod tests {
         // column 0 (align 8) sorts before column 1 (align 4), so its array starts at offset 0.
         assert_eq!(layout.capacity(), 10);
         assert_eq!(layout.column_offsets(), vec![0, columns()[0].size * 10]);
-        assert_eq!(
-            layout.buffer_size(),
-            columns()[0].size * 10 + columns()[1].size * 10 + ENTITY_KEY_SIZE * 10
-        );
+        assert_eq!(layout.buffer_size(), columns()[0].size * 10 + columns()[1].size * 10);
         assert_eq!(layout.buffer_align(), columns()[0].align);
     }
 
     #[test]
     fn excessive_capacity_is_rejected() {
         let ctx = TestContext::mock();
-        let result = ArchetypeChunkLayout::with_capacity(&ctx.meta(), 1000);
+        // Per-entity bytes are 8 + 4; 2000 rows exceed the 16 KiB cap.
+        let result = ArchetypeChunkLayout::with_capacity(&ctx.meta(), 2000);
 
         assert!(matches!(
             result,
@@ -227,16 +200,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_meta_only_keep_entity_key() {
+    fn empty_meta_has_empty_column_layout() {
         let ctx = TestContext::mock();
         let meta = ArchetypeMeta::new(vec![], &ctx.type_reg, &ctx.comp_reg).unwrap();
         let capacity_layout = ArchetypeChunkLayout::with_capacity(&meta, 100).unwrap();
         let size_layout = ArchetypeChunkLayout::with_buffer_size(&meta, 1024).unwrap();
 
         assert_eq!(capacity_layout.column_offsets(), vec![]);
-        assert_eq!(capacity_layout.buffer_align(), ENTITY_KEY_ALIGN);
-        assert_eq!(capacity_layout.buffer_size(), ENTITY_KEY_SIZE * 100);
-        assert_eq!(size_layout.capacity(), 1024 / ENTITY_KEY_SIZE);
+        assert_eq!(capacity_layout.buffer_align(), 1);
+        assert_eq!(capacity_layout.buffer_size(), 0);
+        assert_eq!(size_layout.capacity(), usize::MAX);
         assert_eq!(size_layout.buffer_size(), 1024);
     }
 
@@ -248,12 +221,11 @@ mod tests {
         let layout = ArchetypeChunkLayout::with_buffer_size(&ctx.meta(), 4096 + 4).unwrap();
 
         assert_eq!(layout.buffer_size(), 4096 + 4);
-        assert_eq!(
-            layout.capacity(),
-            4096 / (columns()[0].size + columns()[1].size + ENTITY_KEY_SIZE)
-        );
-        // Entity keys end at the aligned boundary, past the columns, before the tail slack.
-        assert_eq!(layout.entity_key_offset() + ENTITY_KEY_SIZE * layout.capacity(), 4096);
+        assert_eq!(layout.capacity(), 4096 / (columns()[0].size + columns()[1].size));
+
+        // Used payload is column bytes only and stays within the aligned budget.
+        let used_bytes = (columns()[0].size + columns()[1].size) * layout.capacity();
+        assert!(used_bytes <= 4096);
     }
 
     #[test]
