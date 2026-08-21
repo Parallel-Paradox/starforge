@@ -8,7 +8,7 @@ use thiserror::Error;
 pub type ArchetypeSignature = BitSignature;
 
 pub struct ArchetypeRegistry {
-    sign_to_key: HashMap<ArchetypeSignature, ArchetypeKey>,
+    sig_to_key: HashMap<ArchetypeSignature, ArchetypeKey>,
     archetype_entries: Vec<(ArchetypeKey, Archetype)>,
     retired_keys: Vec<ArchetypeKey>,
     instance_id: u32,
@@ -63,7 +63,7 @@ impl Default for ArchetypeRegistry {
         let instance_id = ARCHETYPE_REGISTRY_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
         tracing::trace!(instance_id, "ArchetypeRegistry created.");
         Self {
-            sign_to_key: HashMap::new(),
+            sig_to_key: HashMap::new(),
             archetype_entries: Vec::new(),
             retired_keys: Vec::new(),
             instance_id,
@@ -85,7 +85,7 @@ impl ArchetypeRegistry {
         signature: ArchetypeSignature,
         archetype: Archetype,
     ) -> ArchetypeKey {
-        if let Some(&existing_key) = self.sign_to_key.get(&signature) {
+        if let Some(&existing_key) = self.sig_to_key.get(&signature) {
             return existing_key;
         }
 
@@ -101,7 +101,7 @@ impl ArchetypeRegistry {
             self.archetype_entries.push((key, archetype));
             key
         };
-        self.sign_to_key.insert(signature, key);
+        self.sig_to_key.insert(signature, key);
         tracing::trace!(?key, "ArchetypeRegistry::register created new entry");
         key
     }
@@ -112,7 +112,7 @@ impl ArchetypeRegistry {
         self.key_to_archetype(&key)?;
         tracing::trace!(?key, "ArchetypeRegistry::unregister removing entry");
 
-        self.sign_to_key.retain(|_, stored_key| *stored_key != key);
+        self.sig_to_key.retain(|_, stored_key| *stored_key != key);
 
         let entry = &mut self.archetype_entries[key.index];
         entry.0.generation = entry.0.generation.wrapping_add(1);
@@ -122,24 +122,24 @@ impl ArchetypeRegistry {
     }
 
     /// Looks up the current [`ArchetypeKey`] registered for `signature`.
-    pub fn sign_to_key(&self, signature: &ArchetypeSignature) -> Result<&ArchetypeKey, Error> {
-        self.sign_to_key
+    pub fn sig_to_key(&self, signature: &ArchetypeSignature) -> Result<&ArchetypeKey, Error> {
+        self.sig_to_key
             .get(signature)
             .ok_or_else(|| Error::UnknownSignature { signature: signature.clone() })
     }
 
     /// Looks up the [`Archetype`] registered for `signature`.
-    pub fn sign_to_archetype(&self, signature: &ArchetypeSignature) -> Result<&Archetype, Error> {
-        let key = self.sign_to_key(signature)?;
+    pub fn sig_to_archetype(&self, signature: &ArchetypeSignature) -> Result<&Archetype, Error> {
+        let key = self.sig_to_key(signature)?;
         self.key_to_archetype(key)
     }
 
     /// Looks up the mutable [`Archetype`] registered for `signature`.
-    pub fn sign_to_archetype_mut(
+    pub fn sig_to_archetype_mut(
         &mut self,
         signature: &ArchetypeSignature,
     ) -> Result<&mut Archetype, Error> {
-        let key = *self.sign_to_key(signature)?;
+        let key = *self.sig_to_key(signature)?;
         self.key_to_archetype_mut(&key)
     }
 
@@ -237,7 +237,7 @@ mod tests {
 
         registry.unregister(key).unwrap();
 
-        assert_eq!(registry.sign_to_key(&signature), Err(Error::UnknownSignature { signature }));
+        assert_eq!(registry.sig_to_key(&signature), Err(Error::UnknownSignature { signature }));
         assert!(matches!(
             registry.key_to_archetype(&key),
             Err(Error::GenerationMismatch { expected, actual })
@@ -301,7 +301,7 @@ mod tests {
         let signature = signature(1);
 
         assert!(matches!(
-            registry.sign_to_archetype(&signature),
+            registry.sig_to_archetype(&signature),
             Err(Error::UnknownSignature { signature: actual }) if actual == signature
         ));
     }
@@ -312,7 +312,7 @@ mod tests {
         let signature = signature(1);
         let key = registry.register(signature.clone(), archetype());
 
-        assert!(registry.sign_to_archetype_mut(&signature).is_ok());
+        assert!(registry.sig_to_archetype_mut(&signature).is_ok());
         assert!(registry.key_to_archetype_mut(&key).is_ok());
     }
 }

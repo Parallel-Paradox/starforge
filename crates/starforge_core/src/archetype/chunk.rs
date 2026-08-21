@@ -45,10 +45,10 @@ impl Drop for ArchetypeChunk {
             // SAFETY: Run each non-trivial column's drop glue over its live elements,
             // then free the buffer.
             for (index, column) in self.meta.columns().iter().enumerate() {
-                if let ComponentKind::NonTrivial { drop_fn } = column.comp_meta.kind {
+                if let ComponentKind::NonTrivial { drop_fn } = column.comp_kind {
                     let elements = self.buf_ptr.add(self.layout.column_offsets()[index]);
                     for i in 0..self.len {
-                        drop_fn(elements.add(i * column.type_meta.size));
+                        drop_fn(elements.add(i * column.stride));
                     }
                 }
             }
@@ -135,7 +135,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column(&self, index: usize) -> &[u8] {
-        let element_size = self.meta.columns()[index].type_meta.size;
+        let element_size = self.meta.columns()[index].stride;
         let offset = self.layout.column_offsets()[index];
         // SAFETY: the `index`-th column array starts at `offset` and holds `capacity`
         // elements of `element_size` bytes; `len <= capacity` keeps the
@@ -157,7 +157,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column_mut(&mut self, index: usize) -> &mut [u8] {
-        let element_size = self.meta.columns()[index].type_meta.size;
+        let element_size = self.meta.columns()[index].stride;
         let offset = self.layout.column_offsets()[index];
         // SAFETY: the `index`-th column array starts at `offset` and holds `capacity`
         // elements of `element_size` bytes; `len <= capacity` keeps the
@@ -179,7 +179,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column_chunks(&self, index: usize) -> ChunksExact<'_, u8> {
-        self.get_column(index).chunks_exact(self.meta.columns()[index].type_meta.size)
+        self.get_column(index).chunks_exact(self.meta.columns()[index].stride)
     }
 
     /// Returns a mutable iterator over the `index`-th column's valid entities, one
@@ -193,7 +193,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column_chunks_mut(&mut self, index: usize) -> ChunksExactMut<'_, u8> {
-        let element_size = self.meta.columns()[index].type_meta.size;
+        let element_size = self.meta.columns()[index].stride;
         self.get_column_mut(index).chunks_exact_mut(element_size)
     }
 
@@ -242,7 +242,7 @@ impl ArchetypeChunk {
         }
 
         for (index, column) in self.meta.columns().iter().enumerate() {
-            let bytes = self.len * column.type_meta.size;
+            let bytes = self.len * column.stride;
             // SAFETY: both pointers are the starts of the `index`-th column array in
             // their own allocations (each chunk's offset is scaled by its own
             // capacity), and `self.len <= other.layout.capacity()` keeps the copy
@@ -278,14 +278,14 @@ impl ArchetypeChunk {
                 *offset, columns_size,
                 "meta and layout disagree on column offset {offset}"
             );
-            columns_size += column.type_meta.size * layout.capacity();
+            columns_size += column.stride * layout.capacity();
         }
 
         // Buffer alignment is the maximum of the entity key and the first column's alignment.
         let expected_align = meta
             .columns()
             .first()
-            .map(|column| column.type_meta.align.max(entity_key_align))
+            .map(|column| column.align.max(entity_key_align))
             .unwrap_or(entity_key_align);
         debug_assert_eq!(
             layout.buffer_align(),
@@ -390,9 +390,9 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap().clone();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap().clone();
-            ColumnEntry { type_key, type_meta, comp_key, comp_meta }
+            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
+            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
+            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.

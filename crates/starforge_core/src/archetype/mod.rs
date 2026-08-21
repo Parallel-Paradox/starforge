@@ -237,9 +237,9 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap().clone();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap().clone();
-            ColumnEntry { type_key, type_meta, comp_key, comp_meta }
+            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
+            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
+            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.

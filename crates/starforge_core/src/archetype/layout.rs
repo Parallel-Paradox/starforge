@@ -66,7 +66,7 @@ impl ArchetypeChunkLayout {
         let mut column_offsets = Vec::with_capacity(meta.columns().len());
         for column in meta.columns() {
             column_offsets.push(columns_size);
-            columns_size += column.type_meta.size * capacity;
+            columns_size += column.stride * capacity;
         }
 
         let entity_key_size = Self::ENTITY_KEY_SIZE * capacity;
@@ -103,7 +103,7 @@ impl ArchetypeChunkLayout {
         let buffer_align = Self::buffer_align_for(meta);
         let aligned_size = buffer_size - buffer_size % buffer_align;
         let per_entity =
-            meta.columns().iter().map(|c| c.type_meta.size).sum::<usize>() + Self::ENTITY_KEY_SIZE;
+            meta.columns().iter().map(|c| c.stride).sum::<usize>() + Self::ENTITY_KEY_SIZE;
         let capacity = aligned_size / per_entity;
 
         // Columns at the head, entity keys at the tail; any slack sits between them.
@@ -111,7 +111,7 @@ impl ArchetypeChunkLayout {
         let mut column_offsets = Vec::with_capacity(meta.columns().len());
         for column in meta.columns() {
             column_offsets.push(columns_size);
-            columns_size += column.type_meta.size * capacity;
+            columns_size += column.stride * capacity;
         }
         let entity_key_offset = aligned_size - Self::ENTITY_KEY_SIZE * capacity;
 
@@ -123,7 +123,7 @@ impl ArchetypeChunkLayout {
     fn buffer_align_for(meta: &ArchetypeMeta) -> usize {
         meta.columns()
             .first()
-            .map(|column| column.type_meta.align.max(Self::ENTITY_KEY_ALIGN))
+            .map(|column| column.align.max(Self::ENTITY_KEY_ALIGN))
             .unwrap_or(Self::ENTITY_KEY_ALIGN)
     }
 }
@@ -178,9 +178,9 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap().clone();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap().clone();
-            ColumnEntry { type_key, type_meta, comp_key, comp_meta }
+            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
+            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
+            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
