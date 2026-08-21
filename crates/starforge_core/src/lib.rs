@@ -2,6 +2,7 @@ pub mod archetype;
 pub mod component;
 pub mod entity;
 pub mod macros;
+pub mod sparse_set;
 pub mod system;
 pub mod tool;
 pub mod types;
