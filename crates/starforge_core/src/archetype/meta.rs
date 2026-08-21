@@ -17,7 +17,7 @@ pub struct ColumnEntry {
     pub comp_key: ComponentKey,
     pub stride: usize,
     pub align: usize,
-    pub name: &'static str,
+    pub name: TypeName,
     pub comp_kind: ComponentKind,
 }
 
@@ -35,7 +35,7 @@ impl ColumnEntry {
             comp_key,
             stride: type_meta.size,
             align: type_meta.align,
-            name: type_meta.name,
+            name: type_meta.name.clone(),
             comp_kind: comp_meta.kind,
         }
     }
@@ -162,7 +162,7 @@ mod tests {
                 (TypeId::of_script(7), 4, 4),
             ];
             for (id, size, align) in types {
-                type_reg.register(TypeMeta::new(id, size, align, "test"));
+                type_reg.register(TypeMeta::new(id, size, align, TypeName::of_script("test")));
                 comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
             }
 

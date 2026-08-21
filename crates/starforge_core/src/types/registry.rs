@@ -1,4 +1,4 @@
-use super::{TypeId, TypeMeta};
+use crate::prelude::*;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -212,10 +212,7 @@ mod tests {
         let key2 = registry.register(TypeMeta::of::<u8>());
 
         assert_eq!(key1, key2);
-        assert_eq!(
-            registry.id_to_meta(&TypeId::of::<u8>()).unwrap().name,
-            std::any::type_name::<u8>()
-        );
+        assert_eq!(registry.id_to_meta(&TypeId::of::<u8>()).unwrap().name, TypeName::of::<u8>());
     }
 
     #[test]
@@ -223,8 +220,8 @@ mod tests {
     fn register_panics_in_debug_on_metadata_mismatch() {
         let mut registry = TypeRegistry::default();
         let id = TypeId::of_script(1);
-        registry.register(TypeMeta::new(id, 4, 4, "v1"));
-        registry.register(TypeMeta::new(id, 8, 8, "v2"));
+        registry.register(TypeMeta::new(id, 4, 4, TypeName::of_script("v1")));
+        registry.register(TypeMeta::new(id, 8, 8, TypeName::of_script("v2")));
     }
 
     // debug_assert_eq! above only fires with debug assertions enabled; verify the documented
@@ -234,11 +231,11 @@ mod tests {
     fn register_overwrites_metadata_when_assertions_disabled() {
         let mut registry = TypeRegistry::default();
         let id = TypeId::of_script(2);
-        let key1 = registry.register(TypeMeta::new(id, 4, 4, "v1"));
-        let key2 = registry.register(TypeMeta::new(id, 8, 8, "v2"));
+        let key1 = registry.register(TypeMeta::new(id, 4, 4, TypeName::of_script("v1")));
+        let key2 = registry.register(TypeMeta::new(id, 8, 8, TypeName::of_script("v2")));
 
         assert_eq!(key1, key2);
-        assert_eq!(registry.id_to_meta(&id).unwrap().name, "v2");
+        assert_eq!(registry.id_to_meta(&id).unwrap().name, TypeName::of_script("v2"));
     }
 
     #[test]

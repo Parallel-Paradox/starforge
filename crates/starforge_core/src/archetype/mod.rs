@@ -147,6 +147,7 @@ pub enum ArchetypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -188,10 +189,12 @@ mod tests {
     }
 
     /// Script columns registered by [`TestContext::mock`], in registration order.
-    const COLUMNS: [TypeMeta; 2] = [
-        TypeMeta::new(TypeId::of_script(1), 8, 8, "column_0"),
-        TypeMeta::new(TypeId::of_script(2), 4, 4, "column_1"),
-    ];
+    fn columns() -> [TypeMeta; 2] {
+        [
+            TypeMeta::new(TypeId::of_script(1), 8, 8, TypeName::of_script("column_0")),
+            TypeMeta::new(TypeId::of_script(2), 4, 4, TypeName::of_script("column_1")),
+        ]
+    }
 
     /// Owns the registries backing the columns under test, so keys derived from them stay
     /// resolvable for the lifetime of the context.
@@ -206,7 +209,7 @@ mod tests {
             let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
 
-            for column in &COLUMNS {
+            for column in columns() {
                 type_reg.register(column.clone());
                 comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
             }
@@ -220,7 +223,7 @@ mod tests {
             let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
             let id = TypeId::of_script(1);
-            type_reg.register(TypeMeta::new(id, 8000, 8, "wide"));
+            type_reg.register(TypeMeta::new(id, 8000, 8, TypeName::of_script("wide")));
             comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
             Self { type_reg, comp_reg }
         }
@@ -245,7 +248,7 @@ mod tests {
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
             ArchetypeMeta::new(
-                COLUMNS.iter().map(|c| self.column(c.id)).collect(),
+                columns().iter().map(|c| self.column(c.id)).collect(),
                 &self.type_reg,
                 &self.comp_reg,
             )

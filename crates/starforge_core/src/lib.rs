@@ -12,7 +12,7 @@ pub mod prelude {
         Component, ComponentKey, ComponentKind, ComponentMeta, ComponentRegistry,
     };
     pub use crate::macros::Component;
-    pub use crate::types::{TypeId, TypeKey, TypeMeta, TypeRegistry};
+    pub use crate::types::{TypeId, TypeKey, TypeMeta, TypeName, TypeRegistry};
 }
 
 pub struct Core {}

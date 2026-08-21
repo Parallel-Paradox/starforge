@@ -139,6 +139,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*;
     use crate::{
         archetype::meta::ColumnEntry,
         component::{ComponentKind, ComponentMeta, ComponentRegistry},
@@ -148,10 +149,12 @@ mod tests {
     /// Script columns registered by [`TestContext::mock`], in registration order (component
     /// key index 0 and 1). `ArchetypeMeta::new` reorders them by alignment descending, so
     /// column 0 (align 8) comes first and column 1 (align 4) second.
-    const COLUMNS: [TypeMeta; 2] = [
-        TypeMeta::new(TypeId::of_script(1), 8, 8, "column_0"),
-        TypeMeta::new(TypeId::of_script(2), 4, 4, "column_1"),
-    ];
+    fn columns() -> [TypeMeta; 2] {
+        [
+            TypeMeta::new(TypeId::of_script(1), 8, 8, TypeName::of_script("column_0")),
+            TypeMeta::new(TypeId::of_script(2), 4, 4, TypeName::of_script("column_1")),
+        ]
+    }
     /// Size and alignment of the entity key array element.
     const ENTITY_KEY_SIZE: usize = std::mem::size_of::<EntityKey>();
     const ENTITY_KEY_ALIGN: usize = std::mem::align_of::<EntityKey>();
@@ -167,7 +170,7 @@ mod tests {
             let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
 
-            for column in &COLUMNS {
+            for column in columns() {
                 type_reg.register(column.clone());
                 comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
             }
@@ -186,7 +189,7 @@ mod tests {
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
             ArchetypeMeta::new(
-                COLUMNS.iter().map(|c| self.column(c.id)).collect(),
+                columns().iter().map(|c| self.column(c.id)).collect(),
                 &self.type_reg,
                 &self.comp_reg,
             )
@@ -201,12 +204,12 @@ mod tests {
 
         // column 0 (align 8) sorts before column 1 (align 4), so its array starts at offset 0.
         assert_eq!(layout.capacity(), 10);
-        assert_eq!(layout.column_offsets(), vec![0, COLUMNS[0].size * 10]);
+        assert_eq!(layout.column_offsets(), vec![0, columns()[0].size * 10]);
         assert_eq!(
             layout.buffer_size(),
-            COLUMNS[0].size * 10 + COLUMNS[1].size * 10 + ENTITY_KEY_SIZE * 10
+            columns()[0].size * 10 + columns()[1].size * 10 + ENTITY_KEY_SIZE * 10
         );
-        assert_eq!(layout.buffer_align(), COLUMNS[0].align);
+        assert_eq!(layout.buffer_align(), columns()[0].align);
     }
 
     #[test]
@@ -245,7 +248,10 @@ mod tests {
         let layout = ArchetypeChunkLayout::with_buffer_size(&ctx.meta(), 4096 + 4).unwrap();
 
         assert_eq!(layout.buffer_size(), 4096 + 4);
-        assert_eq!(layout.capacity(), 4096 / (COLUMNS[0].size + COLUMNS[1].size + ENTITY_KEY_SIZE));
+        assert_eq!(
+            layout.capacity(),
+            4096 / (columns()[0].size + columns()[1].size + ENTITY_KEY_SIZE)
+        );
         // Entity keys end at the aligned boundary, past the columns, before the tail slack.
         assert_eq!(layout.entity_key_offset() + ENTITY_KEY_SIZE * layout.capacity(), 4096);
     }
