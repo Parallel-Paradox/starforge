@@ -10,22 +10,86 @@ use std::{
 use crate::prelude::*;
 
 pub use header::{Error, SparseSetHeader};
+use nonmax::NonMaxU32;
 
 /// A sparse set storing one component type's dense data alongside a sparse-to-dense
 /// index, keyed by entity.
 pub struct SparseSet {
-    /// Metadata describing the stored component type, frozen at construction time.
-    pub header: SparseSetHeader,
-    sparse_to_dense: Vec<usize>,
-    dense_to_sparse: Vec<usize>,
-    retired_sparse: Vec<usize>,
+    header: SparseSetHeader,
+    sparse_to_dense: Vec<DenseIndex>,
+    dense_to_sparse: Vec<SparseIndex>,
+    retired_sparse: Vec<SparseIndex>,
     entity_keys: Vec<EntityKey>,
     buf_ptr: NonNull<u8>,
     /// Number of elements `buf_ptr` was allocated to hold.
     capacity: usize,
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SparseIndex(NonMaxU32);
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DenseIndex(NonMaxU32);
+
+impl SparseIndex {
+    /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(Self)
+    }
+
+    /// Creates an index from `usize`, rejecting values larger than `u32::MAX - 1`.
+    pub fn from_usize(value: usize) -> Option<Self> {
+        let value = u32::try_from(value).ok()?;
+        Self::new(value)
+    }
+
+    /// Returns the raw `u32` value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Returns this index as a `usize` for indexing vectors.
+    pub fn as_usize(self) -> usize {
+        self.get() as usize
+    }
+}
+
+impl DenseIndex {
+    /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(Self)
+    }
+
+    /// Creates an index from `usize`, rejecting values larger than `u32::MAX - 1`.
+    pub fn from_usize(value: usize) -> Option<Self> {
+        let value = u32::try_from(value).ok()?;
+        Self::new(value)
+    }
+
+    /// Returns the raw `u32` value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Returns this index as a `usize` for indexing vectors.
+    pub fn as_usize(self) -> usize {
+        self.get() as usize
+    }
+}
+
 impl SparseSet {
+    /// Metadata describing the stored component type, frozen at construction time.
+    pub fn header(&self) -> &SparseSetHeader {
+        &self.header
+    }
+
+    /// Returns a slice of the valid entities in the dense array.
+    pub fn entity_keys(&self) -> &[EntityKey] {
+        &self.entity_keys
+    }
+
     /// Returns the number of entities currently stored in the dense array.
     pub fn len(&self) -> usize {
         self.entity_keys.len()
@@ -46,87 +110,149 @@ impl SparseSet {
     }
 
     /// Builds a `SparseSet` for `header`'s component type with a dense buffer
-    /// preallocated to hold `capacity` elements, sized and aligned from the header.
+    /// preallocated to hold at least `capacity` elements, sized and aligned from the
+    /// header.
     pub fn with_capacity(header: SparseSetHeader, capacity: usize) -> Self {
-        let buf_ptr = if capacity == 0 || header.stride == 0 {
-            NonNull::<u8>::dangling()
-        } else {
-            let layout = Layout::from_size_align(header.stride * capacity, header.align)
-                .expect("sparse set buffer layout must be valid");
-            NonNull::new(unsafe { std::alloc::alloc(layout) })
-                .unwrap_or_else(|| std::alloc::handle_alloc_error(layout))
-        };
-
-        Self {
-            header,
-            sparse_to_dense: Vec::with_capacity(capacity),
-            dense_to_sparse: Vec::with_capacity(capacity),
-            retired_sparse: Vec::new(),
-            entity_keys: Vec::with_capacity(capacity),
-            buf_ptr,
-            capacity,
+        let mut set = Self::new(header);
+        if capacity > 0 {
+            set.reserve(capacity);
         }
+        set
     }
 
-    /// Inserts each entity/component pair from `entity_keys` and `components` (parallel,
-    /// same length and order) into the dense array. Reuses a retired sparse slot per
-    /// insertion when available, otherwise allocates a new one.
+    /// Ensures the dense buffer can hold at least `additional` more elements beyond
+    /// `self.len()`, growing the allocation (by doubling, at minimum) if needed.
+    pub fn reserve(&mut self, additional: usize) {
+        let required = self.len().checked_add(additional).expect("reserve size overflow");
+        if required <= self.capacity {
+            return;
+        }
+
+        let new_capacity = required.max(self.capacity.saturating_mul(2)).max(4);
+
+        if self.header.stride != 0 {
+            let new_layout =
+                Layout::from_size_align(self.header.stride * new_capacity, self.header.align)
+                    .expect("sparse set buffer layout must be valid");
+
+            let new_ptr = if self.capacity == 0 {
+                NonNull::new(unsafe { std::alloc::alloc(new_layout) })
+                    .unwrap_or_else(|| std::alloc::handle_alloc_error(new_layout))
+            } else {
+                let old_layout =
+                    Layout::from_size_align(self.header.stride * self.capacity, self.header.align)
+                        .expect("sparse set buffer layout must be valid");
+                // SAFETY: `buf_ptr` was allocated (or reallocated) with `old_layout`, and
+                // `new_layout` shares its alignment with a strictly larger size.
+                NonNull::new(unsafe {
+                    std::alloc::realloc(self.buf_ptr.as_ptr(), old_layout, new_layout.size())
+                })
+                .unwrap_or_else(|| std::alloc::handle_alloc_error(new_layout))
+            };
+
+            self.buf_ptr = new_ptr;
+        }
+
+        self.capacity = new_capacity;
+        self.sparse_to_dense.reserve(additional);
+        self.dense_to_sparse.reserve(additional);
+        self.entity_keys.reserve(additional);
+    }
+
+    /// Inserts an entity/component pair into the dense array. Reuses a retired sparse
+    /// slot when available, otherwise allocates a new one.
     ///
-    /// Returns the sparse index assigned to each inserted entity, in the same order as
-    /// `entity_keys`.
+    /// Grows the dense buffer (doubling capacity) if it is full.
+    ///
+    /// Returns the sparse index assigned to the inserted entity.
     ///
     /// # Panics
     ///
-    /// Panics if `entity_keys` and `components` differ in length, if a component slice's
-    /// length does not match the header's stride, or if inserting would exceed the dense
-    /// buffer's capacity.
-    pub fn insert(
-        &mut self,
-        entity_keys: &[EntityKey],
-        components: ChunksExactMut<'_, u8>,
-    ) -> Vec<usize> {
+    /// Panics if `comp_data` length does not match the header's stride.
+    pub fn insert(&mut self, entity_key: EntityKey, comp_data: &[u8]) -> SparseIndex {
         assert_eq!(
-            components.len(),
-            entity_keys.len(),
-            "entity_keys and components must have the same length"
+            comp_data.len(),
+            self.header.stride,
+            "component size must match the header's stride"
+        );
+        if self.len() == self.capacity {
+            self.reserve(1);
+        }
+        let dense_index = DenseIndex::from_usize(self.len())
+            .expect("SparseSet cannot index more than u32::MAX - 1 dense entries");
+
+        // SAFETY: `dense_index < capacity` keeps the write within the allocation, and
+        // `comp_data` length was just checked to equal `stride`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                comp_data.as_ptr(),
+                self.buf_ptr.as_ptr().add(dense_index.as_usize() * self.header.stride),
+                self.header.stride,
+            );
+        }
+
+        self.entity_keys.push(entity_key);
+
+        let sparse_index = if let Some(sparse_index) = self.retired_sparse.pop() {
+            self.sparse_to_dense[sparse_index.as_usize()] = dense_index;
+            sparse_index
+        } else {
+            let sparse_index = SparseIndex::from_usize(self.sparse_to_dense.len())
+                .expect("SparseSet cannot index more than u32::MAX - 1 sparse entries");
+            self.sparse_to_dense.push(dense_index);
+            sparse_index
+        };
+
+        self.dense_to_sparse.push(sparse_index);
+        sparse_index
+    }
+
+    /// Removes the entity/component pair addressed by `sparse_index`.
+    ///
+    /// This performs a dense `swap_remove`: if the removed row is not the last dense
+    /// row, the last row is moved into the removed slot and all sparse/dense mappings
+    /// are updated accordingly. The freed sparse slot is retired and may be reused by
+    /// subsequent insertions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sparse_index` is out of bounds or does not refer to a live entry.
+    pub fn remove(&mut self, sparse_index: SparseIndex) {
+        let sparse_pos = sparse_index.as_usize();
+        let remove_dense = self.sparse_to_dense[sparse_pos];
+        let remove_dense_pos = remove_dense.as_usize();
+        let last_dense_pos =
+            self.len().checked_sub(1).expect("cannot remove from an empty sparse set");
+
+        assert_eq!(
+            self.dense_to_sparse[remove_dense_pos], sparse_index,
+            "sparse index does not refer to a live entry"
         );
 
-        let mut sparse_indices = Vec::with_capacity(entity_keys.len());
-        for (&entity_key, component) in entity_keys.iter().zip(components) {
-            assert_eq!(
-                component.len(),
-                self.header.stride,
-                "component size must match the header's stride"
-            );
-            let dense_index = self.len();
-            assert!(dense_index < self.capacity, "sparse set buffer is at capacity");
+        if let ComponentKind::NonTrivial { drop_fn } = self.header.comp_kind {
+            // SAFETY: `remove_dense_pos < len` and `drop_fn` is valid for this component type.
+            unsafe {
+                drop_fn(self.buf_ptr.as_ptr().add(remove_dense_pos * self.header.stride));
+            }
+        }
 
-            // SAFETY: `dense_index < capacity` keeps the write within the allocation, and
-            // `component`'s length was just checked to equal `stride`.
+        if remove_dense_pos != last_dense_pos {
+            // SAFETY: both source and destination are valid dense rows and do not overlap.
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    component.as_ptr(),
-                    self.buf_ptr.as_ptr().add(dense_index * self.header.stride),
+                    self.buf_ptr.as_ptr().add(last_dense_pos * self.header.stride),
+                    self.buf_ptr.as_ptr().add(remove_dense_pos * self.header.stride),
                     self.header.stride,
                 );
             }
 
-            self.entity_keys.push(entity_key);
-
-            let sparse_index = if let Some(sparse_index) = self.retired_sparse.pop() {
-                self.sparse_to_dense[sparse_index] = dense_index;
-                sparse_index
-            } else {
-                let sparse_index = self.sparse_to_dense.len();
-                self.sparse_to_dense.push(dense_index);
-                sparse_index
-            };
-
-            self.dense_to_sparse.push(sparse_index);
-            sparse_indices.push(sparse_index);
+            let moved_sparse = self.dense_to_sparse[last_dense_pos];
+            self.sparse_to_dense[moved_sparse.as_usize()] = remove_dense;
         }
 
-        sparse_indices
+        self.entity_keys.swap_remove(remove_dense_pos);
+        self.dense_to_sparse.swap_remove(remove_dense_pos);
+        self.retired_sparse.push(sparse_index);
     }
 
     /// Returns the bytes of the dense component array covering the valid entities: the
@@ -178,6 +304,7 @@ impl Drop for SparseSet {
     fn drop(&mut self) {
         if let ComponentKind::NonTrivial { drop_fn } = self.header.comp_kind {
             for i in 0..self.len() {
+                // SAFETY: drop_fn only consumes valid component slots.
                 unsafe {
                     drop_fn(self.buf_ptr.as_ptr().add(i * self.header.stride));
                 }
@@ -192,5 +319,194 @@ impl Drop for SparseSet {
         unsafe {
             dealloc(self.buf_ptr.as_ptr(), layout);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::{ComponentKind, ComponentMeta};
+    use crate::entity::{EntityGeneration, EntityIndex};
+    use crate::types::TypeMeta;
+
+    fn entity(id: u32) -> EntityKey {
+        EntityKey {
+            index: EntityIndex::new(id).unwrap(),
+            generation: EntityGeneration::new(0).unwrap(),
+        }
+    }
+
+    fn sparse_set_u32(capacity: usize) -> SparseSet {
+        let mut type_reg = TypeRegistry::default();
+        let mut comp_reg = ComponentRegistry::default();
+        let id = TypeId::of::<u32>();
+        let type_key = type_reg.register(TypeMeta::of::<u32>());
+        let comp_key = comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
+        let header = SparseSetHeader::new(type_key, comp_key, &type_reg, &comp_reg).unwrap();
+        SparseSet::with_capacity(header, capacity)
+    }
+
+    #[test]
+    fn remove_swaps_last_dense_row_and_updates_mappings() {
+        let mut set = sparse_set_u32(4);
+        let s0 = set.insert(entity(0), &11u32.to_ne_bytes());
+        let s1 = set.insert(entity(1), &22u32.to_ne_bytes());
+
+        set.remove(s0);
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.entity_keys[0], entity(1));
+        assert_eq!(set.dense_to_sparse[0], s1);
+        assert_eq!(set.sparse_to_dense[s1.as_usize()], DenseIndex::new(0).unwrap());
+        assert_eq!(set.retired_sparse, vec![s0]);
+    }
+
+    #[test]
+    fn insert_reuses_retired_sparse_slot_after_remove() {
+        let mut set = sparse_set_u32(4);
+        let s0 = set.insert(entity(0), &11u32.to_ne_bytes());
+        let _s1 = set.insert(entity(1), &22u32.to_ne_bytes());
+
+        set.remove(s0);
+        let reused = set.insert(entity(2), &33u32.to_ne_bytes());
+
+        assert_eq!(reused, s0);
+    }
+
+    #[test]
+    fn new_starts_empty_without_allocating() {
+        let set = sparse_set_u32(0);
+
+        assert_eq!(set.len(), 0);
+        assert_eq!(set.capacity, 0);
+        assert!(set.entity_keys().is_empty());
+    }
+
+    #[test]
+    fn with_capacity_preallocates_at_least_the_requested_capacity() {
+        let set = sparse_set_u32(8);
+
+        assert_eq!(set.len(), 0);
+        assert!(set.capacity >= 8);
+    }
+
+    #[test]
+    fn header_reports_the_registered_component_type() {
+        let set = sparse_set_u32(0);
+
+        assert_eq!(set.header().type_id, TypeId::of::<u32>());
+        assert_eq!(set.header().stride, std::mem::size_of::<u32>());
+    }
+
+    #[test]
+    fn reserve_grows_capacity_to_fit_additional_elements() {
+        let mut set = sparse_set_u32(0);
+
+        set.reserve(3);
+
+        assert!(set.capacity >= 3);
+    }
+
+    #[test]
+    fn reserve_is_a_no_op_when_capacity_already_suffices() {
+        let mut set = sparse_set_u32(8);
+        let capacity_before = set.capacity;
+
+        set.reserve(2);
+
+        assert_eq!(set.capacity, capacity_before);
+    }
+
+    #[test]
+    fn insert_grows_the_buffer_automatically_when_full() {
+        let mut set = sparse_set_u32(0);
+
+        for i in 0..5 {
+            set.insert(entity(i), &(i * 10).to_ne_bytes());
+        }
+
+        assert_eq!(set.len(), 5);
+        assert!(set.capacity >= 5);
+    }
+
+    #[test]
+    fn entity_keys_reflects_insertion_order() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &1u32.to_ne_bytes());
+        set.insert(entity(1), &2u32.to_ne_bytes());
+
+        assert_eq!(set.entity_keys(), &[entity(0), entity(1)]);
+    }
+
+    #[test]
+    fn get_component_returns_bytes_for_all_live_entries() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+        set.insert(entity(1), &22u32.to_ne_bytes());
+
+        let values: Vec<u32> = set
+            .get_component()
+            .chunks_exact(4)
+            .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+            .collect();
+
+        assert_eq!(values, vec![11, 22]);
+    }
+
+    #[test]
+    fn get_component_mut_allows_in_place_updates() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+
+        set.get_component_mut()[0..4].copy_from_slice(&99u32.to_ne_bytes());
+
+        let value = u32::from_ne_bytes(set.get_component()[0..4].try_into().unwrap());
+        assert_eq!(value, 99);
+    }
+
+    #[test]
+    fn get_component_chunks_yields_one_chunk_per_entity() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+        set.insert(entity(1), &22u32.to_ne_bytes());
+
+        let values: Vec<u32> = set
+            .get_component_chunks()
+            .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+            .collect();
+
+        assert_eq!(values, vec![11, 22]);
+    }
+
+    #[test]
+    fn get_component_chunks_mut_allows_in_place_updates() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+        set.insert(entity(1), &22u32.to_ne_bytes());
+
+        for chunk in set.get_component_chunks_mut() {
+            let value = u32::from_ne_bytes(chunk.try_into().unwrap());
+            chunk.copy_from_slice(&(value + 1).to_ne_bytes());
+        }
+
+        let values: Vec<u32> = set
+            .get_component_chunks()
+            .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(values, vec![12, 23]);
+    }
+
+    #[test]
+    fn get_component_mut_ptr_points_at_the_dense_buffer_start() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+
+        // SAFETY: writing a single in-bounds `u32` slot that is already initialized.
+        unsafe {
+            set.get_component_mut_ptr().as_ptr().cast::<u32>().write(42);
+        }
+
+        let value = u32::from_ne_bytes(set.get_component()[0..4].try_into().unwrap());
+        assert_eq!(value, 42);
     }
 }
