@@ -156,19 +156,12 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
-            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
+            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
-            ArchetypeMeta::new(
-                columns().iter().map(|c| self.column(c.id)).collect(),
-                &self.type_reg,
-                &self.comp_reg,
-            )
-            .unwrap()
+            ArchetypeMeta::new(columns().iter().map(|c| self.column(c.id)).collect())
         }
     }
 
@@ -201,8 +194,7 @@ mod tests {
 
     #[test]
     fn empty_meta_has_empty_column_layout() {
-        let ctx = TestContext::mock();
-        let meta = ArchetypeMeta::new(vec![], &ctx.type_reg, &ctx.comp_reg).unwrap();
+        let meta = ArchetypeMeta::new(vec![]);
         let capacity_layout = ArchetypeChunkLayout::with_capacity(&meta, 100).unwrap();
         let size_layout = ArchetypeChunkLayout::with_buffer_size(&meta, 1024).unwrap();
 

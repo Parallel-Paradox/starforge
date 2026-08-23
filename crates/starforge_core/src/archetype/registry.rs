@@ -5,8 +5,14 @@ use crate::prelude::*;
 use crate::tool::BitSignature;
 use thiserror::Error;
 
+/// Bitmask identifying the component set of an archetype, supposed to be built from
+/// [`ComponentKey::index`].
+///
+/// The signature is used as the canonical lookup key in [`ArchetypeRegistry`].
+/// Two archetypes with the same component combination share the same signature.
 pub type ArchetypeSignature = BitSignature;
 
+/// Registry for archetypes keyed by [`ArchetypeSignature`].
 pub struct ArchetypeRegistry {
     sig_to_key: HashMap<ArchetypeSignature, ArchetypeKey>,
     archetype_entries: Vec<(ArchetypeKey, Archetype)>,
@@ -54,7 +60,7 @@ impl ArchetypeKey {
     }
 }
 
-/// Process-wide counter handing out unique `ArchetypeRegistry` instance ids.
+/// Process-wide counter handing out unique [`ArchetypeRegistry`] instance ids.
 static ARCHETYPE_REGISTRY_INSTANCE_ID: AtomicU32 = AtomicU32::new(0);
 
 impl Default for ArchetypeRegistry {
@@ -206,9 +212,7 @@ mod tests {
     use std::sync::Arc;
 
     fn archetype() -> Archetype {
-        let type_registry = TypeRegistry::default();
-        let component_registry = ComponentRegistry::default();
-        let meta = ArchetypeMeta::new(vec![], &type_registry, &component_registry).unwrap();
+        let meta = ArchetypeMeta::new(vec![]);
         Archetype::new(Arc::new(meta)).unwrap()
     }
 

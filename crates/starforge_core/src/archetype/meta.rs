@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 /// A single column of an archetype: the component type stored, referenced both by its
-/// `TypeKey` (for layout metadata) and its `ComponentKey` (for storage metadata).
+/// [`TypeKey`] (for layout metadata) and its [`ComponentKey`] (for storage metadata).
 ///
 /// The layout and component fields are **frozen snapshots** taken at [`ArchetypeMeta::new`]
 /// time: once the archetype is built, downstream layout computation reads size/align/drop info
@@ -15,21 +15,33 @@ pub struct ColumnEntry {
     pub type_id: TypeId,
     pub type_key: TypeKey,
     pub comp_key: ComponentKey,
+    /// The size of the component type in bytes.
     pub stride: usize,
+    /// The alignment of the component type in bytes.
     pub align: usize,
     pub name: TypeName,
     pub comp_kind: ComponentKind,
 }
 
 impl ColumnEntry {
-    /// Builds a column entry from registry keys and metadata snapshots.
+    /// Builds a column entry by resolving `type_key`/`comp_key` against the registries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Type`] or [`Error::Component`] if either key no longer resolves, and
+    /// [`Error::KeyMismatch`] if the two keys resolve to different underlying types.
     pub fn new(
         type_key: TypeKey,
         comp_key: ComponentKey,
-        type_meta: &TypeMeta,
-        comp_meta: &ComponentMeta,
-    ) -> Self {
-        Self {
+        type_registry: &TypeRegistry,
+        comp_registry: &ComponentRegistry,
+    ) -> Result<Self, Error> {
+        let type_meta = type_registry.key_to_meta(&type_key)?;
+        let comp_meta = comp_registry.key_to_meta(&comp_key)?;
+        if type_meta.id != comp_meta.id {
+            return Err(Error::KeyMismatch { type_id: type_meta.id, comp_id: comp_meta.id });
+        }
+        Ok(Self {
             type_id: type_meta.id,
             type_key,
             comp_key,
@@ -37,7 +49,7 @@ impl ColumnEntry {
             align: type_meta.align,
             name: type_meta.name.clone(),
             comp_kind: comp_meta.kind,
-        }
+        })
     }
 }
 
@@ -48,40 +60,17 @@ pub struct ArchetypeMeta {
 }
 
 impl ArchetypeMeta {
-    /// Builds `ArchetypeMeta` from `columns`.
+    /// Builds [`ArchetypeMeta`] from `unsorted_columns`, which must already be validated (see
+    /// [`ColumnEntry::new`]).
     ///
-    /// Each column's alignment and size are read from its registered `TypeMeta` via
-    /// `type_registry`. The resolved metadata is **frozen** into each `ColumnEntry` so that
-    /// downstream layout computation never needs to re-query the (mutable) registries.
-    /// The columns are then reordered by **alignment descending**, then **size descending**, then
+    /// The columns are reordered by **alignment descending**, then **size descending**, then
     /// **component key index ascending**. Because this is a total order over the layout
     /// attributes, the resulting column order — and the archetype layout it later drives — is
-    /// independent of the order in which `columns` was passed in.
-    ///
-    /// Every column's `type_key` and `comp_key` are resolved against the (dynamically
-    /// modifiable) registries and checked to refer to the same underlying `TypeId`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ArchetypeMetaError::Type`] or [`ArchetypeMetaError::Component`] if a column's
-    /// key no longer resolves in its registry (e.g. the type was unregistered after the key was
-    /// captured), and [`ArchetypeMetaError::KeyMismatch`] if a column's two keys refer to
-    /// different types.
-    pub fn new(
-        columns: Vec<ColumnEntry>,
-        type_registry: &TypeRegistry,
-        comp_registry: &ComponentRegistry,
-    ) -> Result<Self, Error> {
-        // Resolve each column to its layout metadata and verify its type/component keys agree.
+    /// independent of the order in which `unsorted_columns` was passed in.
+    pub fn new(unsorted_columns: Vec<ColumnEntry>) -> Self {
         let mut keyed: Vec<((Reverse<usize>, Reverse<usize>, usize), TypeId, ColumnEntry)> =
-            Vec::with_capacity(columns.len());
-        for entry in columns {
-            let type_meta = type_registry.key_to_meta(&entry.type_key)?;
-            let comp_meta = comp_registry.key_to_meta(&entry.comp_key)?;
-            if type_meta.id != comp_meta.id {
-                return Err(Error::KeyMismatch { type_id: type_meta.id, comp_id: comp_meta.id });
-            }
-            let entry = ColumnEntry::new(entry.type_key, entry.comp_key, type_meta, comp_meta);
+            Vec::with_capacity(unsorted_columns.len());
+        for entry in unsorted_columns {
             keyed.push((
                 (Reverse(entry.align), Reverse(entry.stride), entry.comp_key.index),
                 entry.type_id,
@@ -99,7 +88,7 @@ impl ArchetypeMeta {
             columns.push(entry);
         }
 
-        Ok(Self { columns, id_to_index })
+        Self { columns, id_to_index }
     }
 
     /// Columns in canonical order (see [`ArchetypeMeta::new`]).
@@ -121,11 +110,11 @@ impl ArchetypeMeta {
 /// Errors returned when building an [`ArchetypeMeta`].
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum Error {
-    /// A column's `TypeKey` does not resolve in the `TypeRegistry`.
+    /// A column's [`TypeKey`] does not resolve in the [`TypeRegistry`].
     #[error(transparent)]
     Type(#[from] crate::types::Error),
 
-    /// A column's `ComponentKey` does not resolve in the `ComponentRegistry`.
+    /// A column's [`ComponentKey`] does not resolve in the [`ComponentRegistry`].
     #[error(transparent)]
     Component(#[from] crate::component::Error),
 
@@ -172,9 +161,7 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
-            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
+            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
         }
 
         /// Resolves the `TypeId` backing the column at `index`.
@@ -186,16 +173,11 @@ mod tests {
     #[test]
     fn sorts_by_alignment_descending() {
         let ctx = TestContext::mock();
-        let meta = ArchetypeMeta::new(
-            vec![
-                ctx.column(TypeId::of_script(3)), // align 2
-                ctx.column(TypeId::of_script(1)), // align 8
-                ctx.column(TypeId::of_script(2)), // align 4
-            ],
-            &ctx.type_reg,
-            &ctx.comp_reg,
-        )
-        .unwrap();
+        let meta = ArchetypeMeta::new(vec![
+            ctx.column(TypeId::of_script(3)), // align 2
+            ctx.column(TypeId::of_script(1)), // align 8
+            ctx.column(TypeId::of_script(2)), // align 4
+        ]);
 
         assert_eq!(meta.columns().len(), 3);
         assert_eq!(ctx.column_id(&meta, 0), TypeId::of_script(1));
@@ -209,15 +191,10 @@ mod tests {
     #[test]
     fn sorts_by_size_descending_within_same_alignment() {
         let ctx = TestContext::mock();
-        let meta = ArchetypeMeta::new(
-            vec![
-                ctx.column(TypeId::of_script(5)), // align 8, size 8
-                ctx.column(TypeId::of_script(4)), // align 8, size 16
-            ],
-            &ctx.type_reg,
-            &ctx.comp_reg,
-        )
-        .unwrap();
+        let meta = ArchetypeMeta::new(vec![
+            ctx.column(TypeId::of_script(5)), // align 8, size 8
+            ctx.column(TypeId::of_script(4)), // align 8, size 16
+        ]);
 
         assert_eq!(ctx.column_id(&meta, 0), TypeId::of_script(4));
         assert_eq!(ctx.column_id(&meta, 1), TypeId::of_script(5));
@@ -226,15 +203,10 @@ mod tests {
     #[test]
     fn sorts_by_component_index_ascending_on_layout_tie() {
         let ctx = TestContext::mock();
-        let meta = ArchetypeMeta::new(
-            vec![
-                ctx.column(TypeId::of_script(7)), // comp index 6
-                ctx.column(TypeId::of_script(6)), // comp index 5
-            ],
-            &ctx.type_reg,
-            &ctx.comp_reg,
-        )
-        .unwrap();
+        let meta = ArchetypeMeta::new(vec![
+            ctx.column(TypeId::of_script(7)), // comp index 6
+            ctx.column(TypeId::of_script(6)), // comp index 5
+        ]);
 
         assert_eq!(ctx.column_id(&meta, 0), TypeId::of_script(6));
         assert_eq!(ctx.column_id(&meta, 1), TypeId::of_script(7));
@@ -253,18 +225,8 @@ mod tests {
             TypeId::of_script(6),
         ];
 
-        let forward = ArchetypeMeta::new(
-            ids.iter().map(|id| ctx.column(*id)).collect(),
-            &ctx.type_reg,
-            &ctx.comp_reg,
-        )
-        .unwrap();
-        let reversed = ArchetypeMeta::new(
-            ids.iter().rev().map(|id| ctx.column(*id)).collect(),
-            &ctx.type_reg,
-            &ctx.comp_reg,
-        )
-        .unwrap();
+        let forward = ArchetypeMeta::new(ids.iter().map(|id| ctx.column(*id)).collect());
+        let reversed = ArchetypeMeta::new(ids.iter().rev().map(|id| ctx.column(*id)).collect());
 
         // align 8: [script 4 (size 16), script 1 (size 8, idx 0), script 5 (size 8, idx 4)]
         // align 4: [script 2 (idx 1), script 6 (idx 5), script 7 (idx 6)]
@@ -292,10 +254,10 @@ mod tests {
     #[test]
     fn rejects_mismatched_type_and_component_keys() {
         let ctx = TestContext::mock();
-        let mut column = ctx.column(TypeId::of_script(1));
-        column.comp_key = *ctx.comp_reg.id_to_key(&TypeId::of_script(2)).unwrap();
+        let type_key = *ctx.type_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+        let comp_key = *ctx.comp_reg.id_to_key(&TypeId::of_script(2)).unwrap();
 
-        let result = ArchetypeMeta::new(vec![column], &ctx.type_reg, &ctx.comp_reg);
+        let result = ColumnEntry::new(type_key, comp_key, &ctx.type_reg, &ctx.comp_reg);
 
         assert!(matches!(
             result,
@@ -311,7 +273,8 @@ mod tests {
         // Stale the type key so it no longer resolves.
         ctx.type_reg.unregister(column.type_key).unwrap();
 
-        let result = ArchetypeMeta::new(vec![column], &ctx.type_reg, &ctx.comp_reg);
+        let result =
+            ColumnEntry::new(column.type_key, column.comp_key, &ctx.type_reg, &ctx.comp_reg);
 
         assert!(matches!(result, Err(Error::Type(_))));
     }
@@ -323,7 +286,8 @@ mod tests {
         // Stale the component key so it no longer resolves.
         ctx.comp_reg.unregister(column.comp_key).unwrap();
 
-        let result = ArchetypeMeta::new(vec![column], &ctx.type_reg, &ctx.comp_reg);
+        let result =
+            ColumnEntry::new(column.type_key, column.comp_key, &ctx.type_reg, &ctx.comp_reg);
 
         assert!(matches!(result, Err(Error::Component(_))));
     }

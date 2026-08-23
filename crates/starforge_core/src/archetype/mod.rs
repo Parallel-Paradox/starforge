@@ -237,29 +237,17 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
-            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
+            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
-            ArchetypeMeta::new(
-                columns().iter().map(|c| self.column(c.id)).collect(),
-                &self.type_reg,
-                &self.comp_reg,
-            )
-            .unwrap()
+            ArchetypeMeta::new(columns().iter().map(|c| self.column(c.id)).collect())
         }
 
         /// Builds an `ArchetypeMeta` over the given ids, in the given order.
         pub fn meta_with(&self, ids: &[TypeId]) -> ArchetypeMeta {
-            ArchetypeMeta::new(
-                ids.iter().map(|id| self.column(*id)).collect(),
-                &self.type_reg,
-                &self.comp_reg,
-            )
-            .unwrap()
+            ArchetypeMeta::new(ids.iter().map(|id| self.column(*id)).collect())
         }
     }
 

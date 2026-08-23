@@ -10,6 +10,7 @@ use crate::{
     prelude::*,
 };
 
+/// A contiguous chunk of memory holding the component data for a set of entities.
 pub struct ArchetypeChunk {
     /// The metadata describing the archetype of this chunk, including its columns and their types.
     pub meta: Arc<ArchetypeMeta>,
@@ -98,10 +99,6 @@ impl ArchetypeChunk {
 
     /// Returns the bytes of the `index`-th column covering the valid entities: the first
     /// `len` elements of that column array.
-    ///
-    /// The slice has length `self.len() * element_size`; slots beyond `len` (up to
-    /// `capacity`) hold no valid entity. The bytes are untyped; reinterpret them as the
-    /// column's component type.
     ///
     /// # Panics
     ///
@@ -335,19 +332,12 @@ mod tests {
         pub fn column(&self, id: TypeId) -> ColumnEntry {
             let type_key = *self.type_reg.id_to_key(&id).unwrap();
             let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            let type_meta = self.type_reg.key_to_meta(&type_key).unwrap();
-            let comp_meta = self.comp_reg.key_to_meta(&comp_key).unwrap();
-            ColumnEntry::new(type_key, comp_key, type_meta, comp_meta)
+            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
-            ArchetypeMeta::new(
-                columns().iter().map(|c| self.column(c.id)).collect(),
-                &self.type_reg,
-                &self.comp_reg,
-            )
-            .unwrap()
+            ArchetypeMeta::new(columns().iter().map(|c| self.column(c.id)).collect())
         }
 
         /// Builds the two-column meta used by the tracker tests over this context's
@@ -355,14 +345,9 @@ mod tests {
         pub fn tracked_meta(&self) -> Arc<ArchetypeMeta> {
             let tracked_id = TypeId::of::<Tracked>();
             let trivial_id = TypeId::of_script(1);
-            Arc::new(
-                ArchetypeMeta::new(
-                    Vec::from([tracked_id, trivial_id].map(|id| self.column(id))),
-                    &self.type_reg,
-                    &self.comp_reg,
-                )
-                .unwrap(),
-            )
+            Arc::new(ArchetypeMeta::new(Vec::from(
+                [tracked_id, trivial_id].map(|id| self.column(id)),
+            )))
         }
 
         /// Builds a chunk over `meta`.
@@ -425,7 +410,7 @@ mod tests {
     #[test]
     fn empty_meta_tracks_len_without_columns() {
         let ctx = TestContext::mock();
-        let meta = ArchetypeMeta::new(vec![], &ctx.type_reg, &ctx.comp_reg).unwrap();
+        let meta = ArchetypeMeta::new(vec![]);
         let mut chunk = ctx.chunk(meta, 8);
 
         unsafe { chunk.set_len(3) };

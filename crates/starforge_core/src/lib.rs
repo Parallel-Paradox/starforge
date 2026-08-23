@@ -12,6 +12,7 @@ pub mod prelude {
     pub use crate::component::{
         Component, ComponentKey, ComponentKind, ComponentMeta, ComponentRegistry,
     };
+    pub use crate::entity::EntityKey;
     pub use crate::macros::Component;
     pub use crate::types::{TypeId, TypeKey, TypeMeta, TypeName, TypeRegistry};
 }
