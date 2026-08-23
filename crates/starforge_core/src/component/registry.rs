@@ -1,82 +1,91 @@
 use super::ComponentMeta;
 use crate::prelude::*;
+use nonmax::NonMaxU32;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
 
 /// Maps [`TypeId`]s to stable [`ComponentKey`]s and their [`ComponentMeta`], with generation-based
-/// invalidation of keys whose slot has been unregistered.
+/// invalidation of keys.
 pub struct ComponentRegistry {
     id_to_key: HashMap<TypeId, ComponentKey>,
-    meta_entries: Vec<(ComponentKey, ComponentMeta)>,
+    /// Slot table: `Some(key)` means live, `None` means retired/vacant waiting for reuse.
+    meta_entries: Vec<(Option<ComponentKey>, ComponentMeta)>,
     retired_keys: Vec<ComponentKey>,
-    instance_id: u32,
 }
 
 /// A stable, generational reference to a component registered in a [`ComponentRegistry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ComponentKey {
     /// Slot index into the owning registry's internal storage.
-    pub index: usize,
+    pub index: ComponentIndex,
     /// Bumped each time the slot is reused, invalidating older keys pointing at it.
-    pub generation: u32,
-    /// Id of the [`ComponentRegistry`] that issued this key; used to reject foreign keys.
-    pub instance_id: u32,
+    pub generation: ComponentGeneration,
 }
 
-impl ComponentKey {
-    /// Sentinel index used by [`Default`], never produced by a live registration.
-    pub const INVALID_INDEX: usize = usize::MAX;
-    /// Sentinel generation used by [`Default`], never produced by a live registration.
-    pub const TOMB_GENERATION: u32 = u32::MAX;
-    /// Sentinel instance id used by [`Default`], never assigned to a real [`ComponentRegistry`].
-    pub const INVALID_INSTANCE_ID: u32 = u32::MAX;
+/// Non-`u32::MAX` slot index for entries inside a [`ComponentRegistry`].
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComponentIndex(NonMaxU32);
+
+/// Non-`u32::MAX` generation token attached to a [`ComponentKey`].
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComponentGeneration(NonMaxU32);
+
+impl ComponentIndex {
+    /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(Self)
+    }
+
+    /// Creates an index from `usize`, rejecting values larger than `u32::MAX - 1`.
+    pub fn from_usize(value: usize) -> Option<Self> {
+        let value = u32::try_from(value).ok()?;
+        Self::new(value)
+    }
+
+    /// Returns the raw `u32` value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Returns this index as a `usize` for indexing vectors.
+    pub fn as_usize(self) -> usize {
+        self.get() as usize
+    }
 }
 
-impl Default for ComponentKey {
-    /// Produces an invalid key that never resolves against any real [`ComponentRegistry`].
-    fn default() -> Self {
-        Self {
-            index: ComponentKey::INVALID_INDEX,
-            generation: ComponentKey::TOMB_GENERATION,
-            instance_id: ComponentKey::INVALID_INSTANCE_ID,
+impl ComponentGeneration {
+    /// Creates a generation from a raw `u32`, rejecting `u32::MAX`.
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(Self)
+    }
+
+    /// Returns the raw `u32` value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Advances to the next generation, wrapping from `u32::MAX - 1` to `0`.
+    pub fn next(self) -> Self {
+        if self.get() == u32::MAX - 1 {
+            // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
+            Self::new(0).unwrap()
+        } else {
+            Self::new(self.get() + 1).expect("next generation must be representable")
         }
     }
 }
-
-impl ComponentKey {
-    /// Returns true if this key is valid.
-    pub fn is_valid(&self) -> bool {
-        self.index != ComponentKey::INVALID_INDEX
-            && self.generation != ComponentKey::TOMB_GENERATION
-            && self.instance_id != ComponentKey::INVALID_INSTANCE_ID
-    }
-}
-
-/// Process-wide counter handing out unique `ComponentRegistry` instance ids.
-static COMPONENT_REGISTRY_INSTANCE_ID: AtomicU32 = AtomicU32::new(0);
 
 impl Default for ComponentRegistry {
-    /// Creates an empty registry with a fresh, process-unique instance id.
+    /// Creates an empty registry.
     fn default() -> Self {
-        // wraps on overflow; fine as long as fewer than u32::MAX registries are alive at once
-        let instance_id = COMPONENT_REGISTRY_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
-        tracing::trace!(instance_id, "ComponentRegistry created.");
-        Self {
-            id_to_key: HashMap::new(),
-            meta_entries: Vec::new(),
-            retired_keys: Vec::new(),
-            instance_id,
-        }
+        tracing::trace!("ComponentRegistry created.");
+        Self { id_to_key: HashMap::new(), meta_entries: Vec::new(), retired_keys: Vec::new() }
     }
 }
 
 impl ComponentRegistry {
-    /// Returns the unique instance id of this registry.
-    pub fn instance_id(&self) -> u32 {
-        self.instance_id
-    }
-
     /// Registers `meta`, returning a stable `ComponentKey`. Re-registering the same `TypeId`
     /// returns the existing key.
     pub fn register(&mut self, meta: ComponentMeta) -> ComponentKey {
@@ -86,20 +95,21 @@ impl ComponentRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.meta_entries[retired_key.index] = (retired_key, meta);
+            self.meta_entries[retired_key.index.as_usize()] = (Some(retired_key), meta);
             retired_key
         } else {
             let key = ComponentKey {
-                index: self.meta_entries.len(),
-                generation: 0,
-                instance_id: self.instance_id,
+                index: ComponentIndex::from_usize(self.meta_entries.len())
+                    .expect("ComponentRegistry cannot index more than u32::MAX - 1 entries"),
+                // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
+                generation: ComponentGeneration::new(0).unwrap(),
             };
-            self.meta_entries.push((key, meta));
+            self.meta_entries.push((Some(key), meta));
             key
         };
         self.id_to_key.insert(type_id, key);
         tracing::trace!(
-            ?type_id, ?key, meta = ?self.meta_entries[key.index].1,
+            ?type_id, ?key, meta = ?self.meta_entries[key.index.as_usize()].1,
             "ComponentRegistry::register created new entry"
         );
         key
@@ -117,9 +127,10 @@ impl ComponentRegistry {
 
         self.id_to_key.remove(&type_id);
 
-        let entry = &mut self.meta_entries[key.index];
-        entry.0.generation = entry.0.generation.wrapping_add(1);
-        self.retired_keys.push(entry.0);
+        let entry = &mut self.meta_entries[key.index.as_usize()];
+        let retired_key = ComponentKey { index: key.index, generation: key.generation.next() };
+        entry.0 = None;
+        self.retired_keys.push(retired_key);
 
         Ok(())
     }
@@ -135,26 +146,30 @@ impl ComponentRegistry {
         self.key_to_meta(key)
     }
 
-    /// Resolves `key` to its `ComponentMeta`, validating that it belongs to this registry
-    /// and that its generation is still current.
+    /// Resolves `key` to its `ComponentMeta`, validating that its generation is still current.
     pub fn key_to_meta(&self, key: &ComponentKey) -> Result<&ComponentMeta, Error> {
-        if key.instance_id != self.instance_id {
-            return Err(Error::ForeignInstance {
-                expected: self.instance_id,
-                actual: key.instance_id,
-            });
+        let (stored_key, meta) =
+            self.meta_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
+                index: key.index.get(),
+                bounds: self.meta_entries.len(),
+            })?;
+        if let Some(stored_key) = stored_key {
+            if stored_key.generation != key.generation {
+                return Err(Error::GenerationMismatch {
+                    expected: stored_key.generation.get(),
+                    actual: key.generation.get(),
+                });
+            }
+            return Ok(meta);
         }
-        let (stored_key, meta) = self
-            .meta_entries
-            .get(key.index)
-            .ok_or(Error::IndexOutOfBounds { index: key.index, bounds: self.meta_entries.len() })?;
-        if stored_key.generation != key.generation {
-            return Err(Error::GenerationMismatch {
-                expected: stored_key.generation,
-                actual: key.generation,
-            });
-        }
-        Ok(meta)
+
+        let expected = self
+            .retired_keys
+            .iter()
+            .find(|retired| retired.index == key.index)
+            .map(|retired| retired.generation.get())
+            .unwrap_or_else(|| key.generation.next().get());
+        Err(Error::GenerationMismatch { expected, actual: key.generation.get() })
     }
 }
 
@@ -167,27 +182,29 @@ pub enum Error {
 
     /// The key's index does not point at a live slot in the registry.
     #[error("Index out of bounds: index {index}, bounds {bounds}")]
-    IndexOutOfBounds { index: usize, bounds: usize },
+    IndexOutOfBounds { index: u32, bounds: usize },
 
     /// The key's generation is stale; its slot has since been unregistered and possibly reused.
     #[error("Generation mismatch: expected generation {expected}, actual {actual}")]
     GenerationMismatch { expected: u32, actual: u32 },
-
-    /// The key was issued by a different `ComponentRegistry` instance.
-    #[error("Foreign registry instance: expected instance id {expected}, actual {actual}")]
-    ForeignInstance { expected: u32, actual: u32 },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::prelude::*;
+    use std::mem::size_of;
 
     #[derive(Component)]
     struct Trivial;
 
     #[derive(Component)]
     struct NonTrivial(#[allow(dead_code)] Box<u8>);
+
+    #[test]
+    fn option_component_key_has_same_size_as_component_key() {
+        assert_eq!(size_of::<ComponentKey>(), size_of::<Option<ComponentKey>>());
+    }
 
     #[test]
     fn of_detects_trivial_component() {
@@ -255,8 +272,8 @@ mod tests {
         assert_eq!(
             registry.key_to_meta(&key),
             Err(Error::GenerationMismatch {
-                expected: key.generation.wrapping_add(1),
-                actual: key.generation,
+                expected: key.generation.next().get(),
+                actual: key.generation.get(),
             })
         );
     }
@@ -270,14 +287,16 @@ mod tests {
         let key_b = registry.register(ComponentMeta::of::<NonTrivial>());
 
         assert_eq!(key_b.index, key_a.index);
-        assert_eq!(key_b.generation, key_a.generation.wrapping_add(1));
-        assert_eq!(key_b.instance_id, key_a.instance_id);
+        assert_eq!(key_b.generation, key_a.generation.next());
     }
 
     #[test]
     fn unregister_unknown_key_returns_error() {
         let mut registry = ComponentRegistry::default();
-        let bogus = ComponentKey { index: 0, generation: 0, instance_id: registry.instance_id() };
+        let bogus = ComponentKey {
+            index: ComponentIndex::new(0).unwrap(),
+            generation: ComponentGeneration::new(0).unwrap(),
+        };
 
         assert_eq!(
             registry.unregister(bogus),
@@ -289,26 +308,12 @@ mod tests {
     fn key_to_meta_out_of_bounds_index_is_rejected() {
         let mut registry = ComponentRegistry::default();
         let key = registry.register(ComponentMeta::of::<Trivial>());
-        let bogus = ComponentKey { index: key.index + 1, ..key };
+        let bogus =
+            ComponentKey { index: ComponentIndex::new(key.index.get() + 1).unwrap(), ..key };
 
         assert_eq!(
             registry.key_to_meta(&bogus),
-            Err(Error::IndexOutOfBounds { index: bogus.index, bounds: 1 })
-        );
-    }
-
-    #[test]
-    fn key_from_another_registry_is_rejected() {
-        let mut registry_a = ComponentRegistry::default();
-        let registry_b = ComponentRegistry::default();
-        let key = registry_a.register(ComponentMeta::of::<Trivial>());
-
-        assert_eq!(
-            registry_b.key_to_meta(&key),
-            Err(Error::ForeignInstance {
-                expected: registry_b.instance_id(),
-                actual: key.instance_id,
-            })
+            Err(Error::IndexOutOfBounds { index: bogus.index.get(), bounds: 1 })
         );
     }
 

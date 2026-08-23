@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::prelude::*;
 use crate::tool::BitSignature;
+use nonmax::NonMaxU32;
 use thiserror::Error;
 
 /// Bitmask identifying the component set of an archetype, supposed to be built from
@@ -15,74 +15,84 @@ pub type ArchetypeSignature = BitSignature;
 /// Registry for archetypes keyed by [`ArchetypeSignature`].
 pub struct ArchetypeRegistry {
     sig_to_key: HashMap<ArchetypeSignature, ArchetypeKey>,
-    archetype_entries: Vec<(ArchetypeKey, Archetype)>,
+    /// Slot table: `Some(key)` means live, `None` means retired/vacant waiting for reuse.
+    archetype_entries: Vec<(Option<ArchetypeKey>, Archetype)>,
     retired_keys: Vec<ArchetypeKey>,
-    instance_id: u32,
 }
 
 /// A stable, generational reference to an archetype registered in an [`ArchetypeRegistry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArchetypeKey {
     /// Slot index into the owning registry's internal storage.
-    pub index: usize,
+    pub index: ArchetypeIndex,
     /// Bumped each time the slot is reused, invalidating older keys pointing at it.
-    pub generation: u32,
-    /// Id of the [`ArchetypeRegistry`] that issued this key; used to reject foreign keys.
-    pub instance_id: u32,
+    pub generation: ArchetypeGeneration,
 }
 
-impl ArchetypeKey {
-    /// Sentinel index used by [`Default`], never produced by a live registration.
-    pub const INVALID_INDEX: usize = usize::MAX;
-    /// Sentinel generation used by [`Default`], never produced by a live registration.
-    pub const TOMB_GENERATION: u32 = u32::MAX;
-    /// Sentinel instance id used by [`Default`], never assigned to a real [`ArchetypeRegistry`].
-    pub const INVALID_INSTANCE_ID: u32 = u32::MAX;
+/// Non-`u32::MAX` slot index for entries inside an [`ArchetypeRegistry`].
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArchetypeIndex(NonMaxU32);
+
+/// Non-`u32::MAX` generation token attached to an [`ArchetypeKey`].
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArchetypeGeneration(NonMaxU32);
+
+impl ArchetypeIndex {
+    /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(Self)
+    }
+
+    /// Creates an index from `usize`, rejecting values larger than `u32::MAX - 1`.
+    pub fn from_usize(value: usize) -> Option<Self> {
+        let value = u32::try_from(value).ok()?;
+        Self::new(value)
+    }
+
+    /// Returns the raw `u32` value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Returns this index as a `usize` for indexing vectors.
+    pub fn as_usize(self) -> usize {
+        self.get() as usize
+    }
 }
 
-impl Default for ArchetypeKey {
-    /// Produces an invalid key that never resolves against any real [`ArchetypeRegistry`].
-    fn default() -> Self {
-        Self {
-            index: ArchetypeKey::INVALID_INDEX,
-            generation: ArchetypeKey::TOMB_GENERATION,
-            instance_id: ArchetypeKey::INVALID_INSTANCE_ID,
+impl ArchetypeGeneration {
+    /// Creates a generation from a raw `u32`, rejecting `u32::MAX`.
+    pub fn new(value: u32) -> Option<Self> {
+        NonMaxU32::new(value).map(Self)
+    }
+
+    /// Returns the raw `u32` value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Advances to the next generation, wrapping from `u32::MAX - 1` to `0`.
+    pub fn next(self) -> Self {
+        if self.get() == u32::MAX - 1 {
+            // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
+            Self::new(0).unwrap()
+        } else {
+            Self::new(self.get() + 1).expect("next generation must be representable")
         }
     }
 }
-
-impl ArchetypeKey {
-    /// Returns true if this key is valid.
-    pub fn is_valid(&self) -> bool {
-        self.index != ArchetypeKey::INVALID_INDEX
-            && self.generation != ArchetypeKey::TOMB_GENERATION
-            && self.instance_id != ArchetypeKey::INVALID_INSTANCE_ID
-    }
-}
-
-/// Process-wide counter handing out unique [`ArchetypeRegistry`] instance ids.
-static ARCHETYPE_REGISTRY_INSTANCE_ID: AtomicU32 = AtomicU32::new(0);
 
 impl Default for ArchetypeRegistry {
-    /// Creates an empty registry with a fresh, process-unique instance id.
+    /// Creates an empty registry.
     fn default() -> Self {
-        let instance_id = ARCHETYPE_REGISTRY_INSTANCE_ID.fetch_add(1, Ordering::Relaxed);
-        tracing::trace!(instance_id, "ArchetypeRegistry created.");
-        Self {
-            sig_to_key: HashMap::new(),
-            archetype_entries: Vec::new(),
-            retired_keys: Vec::new(),
-            instance_id,
-        }
+        tracing::trace!("ArchetypeRegistry created.");
+        Self { sig_to_key: HashMap::new(), archetype_entries: Vec::new(), retired_keys: Vec::new() }
     }
 }
 
 impl ArchetypeRegistry {
-    /// Returns the unique instance id of this registry.
-    pub fn instance_id(&self) -> u32 {
-        self.instance_id
-    }
-
     /// Registers `archetype` for `signature`, returning a stable [`ArchetypeKey`].
     /// Registering the same signature again returns the existing key and keeps the existing
     /// archetype unchanged.
@@ -96,15 +106,16 @@ impl ArchetypeRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.archetype_entries[retired_key.index] = (retired_key, archetype);
+            self.archetype_entries[retired_key.index.as_usize()] = (Some(retired_key), archetype);
             retired_key
         } else {
             let key = ArchetypeKey {
-                index: self.archetype_entries.len(),
-                generation: 0,
-                instance_id: self.instance_id,
+                index: ArchetypeIndex::from_usize(self.archetype_entries.len())
+                    .expect("ArchetypeRegistry cannot index more than u32::MAX - 1 entries"),
+                // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
+                generation: ArchetypeGeneration::new(0).unwrap(),
             };
-            self.archetype_entries.push((key, archetype));
+            self.archetype_entries.push((Some(key), archetype));
             key
         };
         self.sig_to_key.insert(signature, key);
@@ -120,9 +131,10 @@ impl ArchetypeRegistry {
 
         self.sig_to_key.retain(|_, stored_key| *stored_key != key);
 
-        let entry = &mut self.archetype_entries[key.index];
-        entry.0.generation = entry.0.generation.wrapping_add(1);
-        self.retired_keys.push(entry.0);
+        let entry = &mut self.archetype_entries[key.index.as_usize()];
+        let retired_key = ArchetypeKey { index: key.index, generation: key.generation.next() };
+        entry.0 = None;
+        self.retired_keys.push(retired_key);
 
         Ok(())
     }
@@ -149,39 +161,43 @@ impl ArchetypeRegistry {
         self.key_to_archetype_mut(&key)
     }
 
-    /// Resolves `key` to its [`Archetype`], validating that it belongs to this registry
-    /// and that its generation is still current.
+    /// Resolves `key` to its [`Archetype`], validating that its generation is still current.
     pub fn key_to_archetype(&self, key: &ArchetypeKey) -> Result<&Archetype, Error> {
         let index = self.key_to_index(key)?;
         Ok(&self.archetype_entries[index].1)
     }
 
-    /// Resolves `key` to a mutable [`Archetype`], validating that it belongs to this registry
-    /// and that its generation is still current.
+    /// Resolves `key` to a mutable [`Archetype`], validating that its generation is still current.
     pub fn key_to_archetype_mut(&mut self, key: &ArchetypeKey) -> Result<&mut Archetype, Error> {
         let index = self.key_to_index(key)?;
         Ok(&mut self.archetype_entries[index].1)
     }
 
     fn key_to_index(&self, key: &ArchetypeKey) -> Result<usize, Error> {
-        if key.instance_id != self.instance_id {
-            return Err(Error::ForeignInstance {
-                expected: self.instance_id,
-                actual: key.instance_id,
-            });
-        }
         let (stored_key, _) =
-            self.archetype_entries.get(key.index).ok_or(Error::IndexOutOfBounds {
-                index: key.index,
-                bounds: self.archetype_entries.len(),
-            })?;
-        if stored_key.generation != key.generation {
-            return Err(Error::GenerationMismatch {
-                expected: stored_key.generation,
-                actual: key.generation,
-            });
+            self.archetype_entries
+                .get(key.index.as_usize())
+                .ok_or(Error::IndexOutOfBounds {
+                    index: key.index.get(),
+                    bounds: self.archetype_entries.len(),
+                })?;
+        if let Some(stored_key) = stored_key {
+            if stored_key.generation != key.generation {
+                return Err(Error::GenerationMismatch {
+                    expected: stored_key.generation.get(),
+                    actual: key.generation.get(),
+                });
+            }
+            return Ok(key.index.as_usize());
         }
-        Ok(key.index)
+
+        let expected = self
+            .retired_keys
+            .iter()
+            .find(|retired| retired.index == key.index)
+            .map(|retired| retired.generation.get())
+            .unwrap_or_else(|| key.generation.next().get());
+        Err(Error::GenerationMismatch { expected, actual: key.generation.get() })
     }
 }
 
@@ -194,22 +210,24 @@ pub enum Error {
 
     /// The key's index does not point at an entry in the registry.
     #[error("Index out of bounds: index {index}, bounds {bounds}")]
-    IndexOutOfBounds { index: usize, bounds: usize },
+    IndexOutOfBounds { index: u32, bounds: usize },
 
     /// The key's generation is stale; its slot has since been unregistered and possibly reused.
     #[error("Generation mismatch: expected generation {expected}, actual {actual}")]
     GenerationMismatch { expected: u32, actual: u32 },
-
-    /// The key was issued by a different `ArchetypeRegistry` instance.
-    #[error("Foreign registry instance: expected instance id {expected}, actual {actual}")]
-    ForeignInstance { expected: u32, actual: u32 },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::archetype::ArchetypeMeta;
+    use std::mem::size_of;
     use std::sync::Arc;
+
+    #[test]
+    fn option_archetype_key_has_same_size_as_archetype_key() {
+        assert_eq!(size_of::<ArchetypeKey>(), size_of::<Option<ArchetypeKey>>());
+    }
 
     fn archetype() -> Archetype {
         let meta = ArchetypeMeta::new(vec![]);
@@ -245,7 +263,7 @@ mod tests {
         assert!(matches!(
             registry.key_to_archetype(&key),
             Err(Error::GenerationMismatch { expected, actual })
-                if expected == key.generation.wrapping_add(1) && actual == key.generation
+                if expected == key.generation.next().get() && actual == key.generation.get()
         ));
     }
 
@@ -258,14 +276,16 @@ mod tests {
         let key_b = registry.register(signature(2), archetype());
 
         assert_eq!(key_b.index, key_a.index);
-        assert_eq!(key_b.generation, key_a.generation.wrapping_add(1));
-        assert_eq!(key_b.instance_id, key_a.instance_id);
+        assert_eq!(key_b.generation, key_a.generation.next());
     }
 
     #[test]
     fn unregister_unknown_key_returns_error() {
         let mut registry = ArchetypeRegistry::default();
-        let bogus = ArchetypeKey { index: 0, generation: 0, instance_id: registry.instance_id() };
+        let bogus = ArchetypeKey {
+            index: ArchetypeIndex::new(0).unwrap(),
+            generation: ArchetypeGeneration::new(0).unwrap(),
+        };
 
         assert_eq!(
             registry.unregister(bogus),
@@ -277,25 +297,13 @@ mod tests {
     fn key_to_archetype_out_of_bounds_index_is_rejected() {
         let mut registry = ArchetypeRegistry::default();
         let key = registry.register(signature(1), archetype());
-        let bogus = ArchetypeKey { index: key.index + 1, ..key };
+        let bogus =
+            ArchetypeKey { index: ArchetypeIndex::new(key.index.get() + 1).unwrap(), ..key };
 
         assert!(matches!(
             registry.key_to_archetype(&bogus),
             Err(Error::IndexOutOfBounds { index, bounds })
-                if index == bogus.index && bounds == 1
-        ));
-    }
-
-    #[test]
-    fn key_from_another_registry_is_rejected() {
-        let mut registry_a = ArchetypeRegistry::default();
-        let registry_b = ArchetypeRegistry::default();
-        let key = registry_a.register(signature(1), archetype());
-
-        assert!(matches!(
-            registry_b.key_to_archetype(&key),
-            Err(Error::ForeignInstance { expected, actual })
-                if expected == registry_b.instance_id() && actual == key.instance_id
+                if index == bogus.index.get() && bounds == 1
         ));
     }
 

@@ -72,7 +72,7 @@ impl ArchetypeMeta {
             Vec::with_capacity(unsorted_columns.len());
         for entry in unsorted_columns {
             keyed.push((
-                (Reverse(entry.align), Reverse(entry.stride), entry.comp_key.index),
+                (Reverse(entry.align), Reverse(entry.stride), entry.comp_key.index.as_usize()),
                 entry.type_id,
                 entry,
             ));

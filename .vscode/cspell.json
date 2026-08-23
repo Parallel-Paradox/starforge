@@ -2,9 +2,10 @@
     "version": "0.2",
     "language": "en",
     "words": [
-        "arity",
         "arities",
+        "arity",
         "miri",
+        "nonmax",
         "nonoverlapping",
         "rposition",
         "serde",

@@ -1,3 +1,3 @@
 mod registry;
 
-pub use registry::{EntityKey, EntityRegistry};
+pub use registry::{EntityGeneration, EntityIndex, EntityKey, EntityRegistry};

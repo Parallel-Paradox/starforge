@@ -9,7 +9,10 @@ use thiserror::Error;
 pub use chunk::ArchetypeChunk;
 pub use layout::{ArchetypeChunkLayout, Error as LayoutError};
 pub use meta::{ArchetypeMeta, ColumnEntry, Error as MetaError};
-pub use registry::{ArchetypeKey, ArchetypeRegistry, ArchetypeSignature, Error as RegistryError};
+pub use registry::{
+    ArchetypeGeneration, ArchetypeIndex, ArchetypeKey, ArchetypeRegistry, ArchetypeSignature,
+    Error as RegistryError,
+};
 
 use crate::entity::EntityKey;
 

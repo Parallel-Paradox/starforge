@@ -8,3 +8,4 @@ starforge_core_macro = { path = "./macro" }
 
 tracing = "0.1"
 thiserror = "2.0"
+nonmax = "0.5"
