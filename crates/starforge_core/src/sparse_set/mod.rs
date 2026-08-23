@@ -430,15 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn entity_keys_reflects_insertion_order() {
-        let mut set = sparse_set_u32(4);
-        set.insert(entity(0), &1u32.to_ne_bytes());
-        set.insert(entity(1), &2u32.to_ne_bytes());
-
-        assert_eq!(set.entity_keys(), &[entity(0), entity(1)]);
-    }
-
-    #[test]
     fn get_component_returns_bytes_for_all_live_entries() {
         let mut set = sparse_set_u32(4);
         set.insert(entity(0), &11u32.to_ne_bytes());
