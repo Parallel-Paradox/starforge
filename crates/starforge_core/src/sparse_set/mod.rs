@@ -9,7 +9,11 @@ use std::{
 
 use crate::prelude::*;
 
-pub use header::{Error, SparseSetHeader};
+pub use header::{Error as HeaderError, SparseSetHeader};
+pub use registry::{
+    Error as RegistryError, SparseSetGeneration, SparseSetIndex, SparseSetKey, SparseSetRegistry,
+};
+
 use nonmax::NonMaxU32;
 
 /// A sparse set storing one component type's dense data alongside a sparse-to-dense
@@ -25,10 +29,20 @@ pub struct SparseSet {
     capacity: usize,
 }
 
+/// Non-`u32::MAX` slot index into a [`SparseSet`]'s sparse array, keyed by entity.
+///
+/// Each live entity owns a `SparseIndex` that resolves to its current dense position
+/// through the set's `sparse_to_dense` mapping. Slots are recycled: removing an entity
+/// retires its sparse slot, and a later insertion may reuse it.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SparseIndex(NonMaxU32);
 
+/// Non-`u32::MAX` slot index into a [`SparseSet`]'s dense array.
+///
+/// The dense array stores one component value per live entity, packed contiguously.
+/// A `DenseIndex` addresses a row in that array; `swap_remove` keeps it packed by
+/// moving the last row into a removed slot.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DenseIndex(NonMaxU32);

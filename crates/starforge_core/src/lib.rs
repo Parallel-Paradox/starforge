@@ -14,6 +14,7 @@ pub mod prelude {
     };
     pub use crate::entity::EntityKey;
     pub use crate::macros::Component;
+    pub use crate::sparse_set::{SparseSet, SparseSetKey, SparseSetRegistry};
     pub use crate::types::{TypeId, TypeKey, TypeMeta, TypeName, TypeRegistry};
 }
 
