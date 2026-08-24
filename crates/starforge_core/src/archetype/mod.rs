@@ -34,6 +34,58 @@ impl Archetype {
         self.entity_keys.len()
     }
 
+    /// Returns all live entity keys in row order.
+    pub fn get_entity_keys(&self) -> &[EntityKey] {
+        &self.entity_keys
+    }
+
+    /// Returns the bytes of one component at `column` for `row`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row` is out of bounds of live entities, or if `column`
+    /// is out of bounds of the archetype columns.
+    pub fn get_column_row(&self, column: usize, row: usize) -> &[u8] {
+        let (chunk_index, row_in_chunk) = self.locate_row(row);
+        let chunk = &self.chunks[chunk_index];
+        let stride = chunk.meta.columns()[column].stride;
+        let start = row_in_chunk * stride;
+        let end = start + stride;
+        &chunk.get_column(column)[start..end]
+    }
+
+    /// Returns mutable bytes of one component at `column` for `row`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `row` is out of bounds of live entities, or if `column`
+    /// is out of bounds of the archetype columns.
+    pub fn get_column_row_mut(&mut self, column: usize, row: usize) -> &mut [u8] {
+        let (chunk_index, row_in_chunk) = self.locate_row(row);
+        let chunk = &mut self.chunks[chunk_index];
+        let stride = chunk.meta.columns()[column].stride;
+        let start = row_in_chunk * stride;
+        let end = start + stride;
+        &mut chunk.get_column_mut(column)[start..end]
+    }
+
+    /// Maps a global row index to `(chunk_index, row_in_chunk)` using each chunk's
+    /// live length.
+    fn locate_row(&self, row: usize) -> (usize, usize) {
+        assert!(row < self.len(), "row out of bounds");
+
+        let mut base = 0;
+        for (chunk_index, chunk) in self.chunks.iter().enumerate() {
+            let next = base + chunk.len();
+            if row < next {
+                return (chunk_index, row - base);
+            }
+            base = next;
+        }
+
+        unreachable!("row is within total length but no chunk contains it");
+    }
+
     /// Creates an empty archetype backed by a single chunk whose layout holds exactly
     /// one entity; the chunk grows on demand via [`Archetype::reserve`].
     ///
@@ -155,6 +207,7 @@ pub enum ArchetypeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::{EntityGeneration, EntityIndex};
     use crate::prelude::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -251,6 +304,13 @@ mod tests {
         /// Builds an `ArchetypeMeta` over the given ids, in the given order.
         pub fn meta_with(&self, ids: &[TypeId]) -> ArchetypeMeta {
             ArchetypeMeta::new(ids.iter().map(|id| self.column(*id)).collect())
+        }
+    }
+
+    fn entity_key(index: u32) -> EntityKey {
+        EntityKey {
+            index: EntityIndex::new(index).unwrap(),
+            generation: EntityGeneration::new(0).unwrap(),
         }
     }
 
@@ -370,5 +430,68 @@ mod tests {
         archetype.reserve(32);
 
         assert!(archetype.entity_keys.capacity() >= before.saturating_add(32));
+    }
+
+    #[test]
+    fn get_column_row_reads_and_writes_in_single_chunk() {
+        let ctx = TestContext::mock();
+        let mut archetype = Archetype::new(Arc::new(ctx.meta())).unwrap();
+
+        archetype.reserve(3);
+
+        // Keep logical row count in sync with `ArchetypeChunk::len` for this test.
+        archetype.entity_keys.resize(3, entity_key(0));
+        unsafe {
+            archetype.chunks[0].set_len(3);
+        }
+
+        // Fill rows in column 0 as u64 values.
+        for (i, slot) in archetype.chunks[0].get_column_chunks_mut(0).enumerate() {
+            slot.copy_from_slice(&((i as u64 + 1) * 10).to_ne_bytes());
+        }
+
+        let row = 1usize;
+        assert_eq!(u64::from_ne_bytes(archetype.get_column_row(0, row).try_into().unwrap()), 20);
+
+        archetype.get_column_row_mut(0, row).copy_from_slice(&99u64.to_ne_bytes());
+        assert_eq!(u64::from_ne_bytes(archetype.get_column_row(0, row).try_into().unwrap()), 99);
+    }
+
+    #[test]
+    fn get_column_row_reads_across_chunks() {
+        let ctx = TestContext::mock_wide();
+        let meta = ctx.meta_with(&[TypeId::of_script(1)]);
+        let mut archetype = Archetype::new(Arc::new(meta)).unwrap();
+
+        // First chunk capacity becomes 2 at max buffer size; reserve appends chunks.
+        archetype.reserve(3);
+
+        archetype.entity_keys.resize(4, entity_key(0));
+        unsafe {
+            archetype.chunks[0].set_len(2);
+            archetype.chunks[1].set_len(2);
+        }
+
+        // Each row writes a distinct u64 prefix in its 8000-byte slot.
+        for i in 0..4 {
+            let row = i;
+            let slot = archetype.get_column_row_mut(0, row);
+            slot[..8].copy_from_slice(&((i as u64 + 1) * 111).to_ne_bytes());
+        }
+
+        for i in 0..4 {
+            let row = i;
+            let slot = archetype.get_column_row(0, row);
+            assert_eq!(u64::from_ne_bytes(slot[..8].try_into().unwrap()), (i as u64 + 1) * 111);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "row out of bounds")]
+    fn get_column_row_panics_when_row_out_of_bounds() {
+        let ctx = TestContext::mock();
+        let archetype = Archetype::new(Arc::new(ctx.meta())).unwrap();
+        let row = 0usize;
+        let _ = archetype.get_column_row(0, row);
     }
 }
