@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::archetype::{ArchetypeMeta, Error as ArchetypeError};
 use crate::prelude::*;
 use crate::tool::BitSignature;
 use nonmax::NonMaxU32;
@@ -93,17 +95,21 @@ impl Default for ArchetypeRegistry {
 }
 
 impl ArchetypeRegistry {
-    /// Registers `archetype` for `signature`, returning a stable [`ArchetypeKey`].
-    /// Registering the same signature again returns the existing key and keeps the existing
-    /// archetype unchanged.
-    pub fn register(
-        &mut self,
-        signature: ArchetypeSignature,
-        archetype: Archetype,
-    ) -> ArchetypeKey {
+    /// Registers an archetype built from `meta`, returning a stable [`ArchetypeKey`].
+    /// The signature comes from [`ArchetypeMeta::signature`]; registering the same
+    /// signature again returns the existing key and keeps the existing archetype unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchetypeError::ArchetypeTooLarge`] if a single entity's bytes exceed
+    /// [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
+    pub fn register(&mut self, meta: Arc<ArchetypeMeta>) -> Result<ArchetypeKey, ArchetypeError> {
+        let signature = meta.signature().clone();
         if let Some(&existing_key) = self.sig_to_key.get(&signature) {
-            return existing_key;
+            return Ok(existing_key);
         }
+
+        let archetype = Archetype::new(meta)?;
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
             self.archetype_entries[retired_key.index.as_usize()] = (Some(retired_key), archetype);
@@ -120,7 +126,7 @@ impl ArchetypeRegistry {
         };
         self.sig_to_key.insert(signature, key);
         tracing::trace!(?key, "ArchetypeRegistry::register created new entry");
-        key
+        Ok(key)
     }
 
     /// Invalidates `key`, retiring its slot for reuse with a bumped generation.
@@ -220,7 +226,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archetype::ArchetypeMeta;
+    use crate::archetype::{ArchetypeMeta, ColumnEntry};
     use std::mem::size_of;
     use std::sync::Arc;
 
@@ -229,33 +235,60 @@ mod tests {
         assert_eq!(size_of::<ArchetypeKey>(), size_of::<Option<ArchetypeKey>>());
     }
 
-    fn archetype() -> Archetype {
-        let meta = ArchetypeMeta::new(vec![]);
-        Archetype::new(Arc::new(meta)).unwrap()
+    /// Owns the registries backing the columns under test, so keys derived from them stay
+    /// resolvable for the lifetime of the context.
+    struct TestContext {
+        type_reg: TypeRegistry,
+        comp_reg: ComponentRegistry,
     }
 
-    fn signature(bit: usize) -> ArchetypeSignature {
-        let mut signature = ArchetypeSignature::default();
-        signature.set(bit);
-        signature
+    impl TestContext {
+        /// Builds a context holding three script columns, in registration order.
+        pub fn mock() -> Self {
+            let mut type_reg = TypeRegistry::default();
+            let mut comp_reg = ComponentRegistry::default();
+            for id in [
+                TypeId::of_script(1),
+                TypeId::of_script(2),
+                TypeId::of_script(3),
+            ] {
+                type_reg.register(TypeMeta::new(id, 8, 8, TypeName::of_script("test")));
+                comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
+            }
+            Self { type_reg, comp_reg }
+        }
+
+        pub fn column(&self, id: TypeId) -> ColumnEntry {
+            let type_key = *self.type_reg.id_to_key(&id).unwrap();
+            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
+            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
+        }
+
+        /// Builds an `Arc<ArchetypeMeta>` over the given ids, in the given order.
+        pub fn meta(&self, ids: &[TypeId]) -> Arc<ArchetypeMeta> {
+            Arc::new(ArchetypeMeta::new(ids.iter().map(|id| self.column(*id)).collect()))
+        }
     }
 
     #[test]
     fn register_is_idempotent_for_same_signature() {
+        let ctx = TestContext::mock();
         let mut registry = ArchetypeRegistry::default();
-        let signature = signature(1);
+        let meta = ctx.meta(&[TypeId::of_script(1)]);
 
-        let key_a = registry.register(signature.clone(), archetype());
-        let key_b = registry.register(signature, archetype());
+        let key_a = registry.register(meta.clone()).unwrap();
+        let key_b = registry.register(meta).unwrap();
 
         assert_eq!(key_a, key_b);
     }
 
     #[test]
     fn unregister_invalidates_the_key() {
+        let ctx = TestContext::mock();
         let mut registry = ArchetypeRegistry::default();
-        let signature = signature(1);
-        let key = registry.register(signature.clone(), archetype());
+        let meta = ctx.meta(&[TypeId::of_script(1)]);
+        let signature = meta.signature().clone();
+        let key = registry.register(meta).unwrap();
 
         registry.unregister(key).unwrap();
 
@@ -269,11 +302,12 @@ mod tests {
 
     #[test]
     fn register_reuses_retired_slot_with_bumped_generation() {
+        let ctx = TestContext::mock();
         let mut registry = ArchetypeRegistry::default();
-        let key_a = registry.register(signature(1), archetype());
+        let key_a = registry.register(ctx.meta(&[TypeId::of_script(1)])).unwrap();
         registry.unregister(key_a).unwrap();
 
-        let key_b = registry.register(signature(2), archetype());
+        let key_b = registry.register(ctx.meta(&[TypeId::of_script(2)])).unwrap();
 
         assert_eq!(key_b.index, key_a.index);
         assert_eq!(key_b.generation, key_a.generation.next());
@@ -295,8 +329,9 @@ mod tests {
 
     #[test]
     fn key_to_archetype_out_of_bounds_index_is_rejected() {
+        let ctx = TestContext::mock();
         let mut registry = ArchetypeRegistry::default();
-        let key = registry.register(signature(1), archetype());
+        let key = registry.register(ctx.meta(&[TypeId::of_script(1)])).unwrap();
         let bogus =
             ArchetypeKey { index: ArchetypeIndex::new(key.index.get() + 1).unwrap(), ..key };
 
@@ -309,8 +344,9 @@ mod tests {
 
     #[test]
     fn unknown_signature_returns_error() {
+        let ctx = TestContext::mock();
         let registry = ArchetypeRegistry::default();
-        let signature = signature(1);
+        let signature = ctx.meta(&[TypeId::of_script(1)]).signature().clone();
 
         assert!(matches!(
             registry.sig_to_archetype(&signature),
@@ -320,9 +356,11 @@ mod tests {
 
     #[test]
     fn mutable_lookups_resolve_registered_archetype() {
+        let ctx = TestContext::mock();
         let mut registry = ArchetypeRegistry::default();
-        let signature = signature(1);
-        let key = registry.register(signature.clone(), archetype());
+        let meta = ctx.meta(&[TypeId::of_script(1)]);
+        let signature = meta.signature().clone();
+        let key = registry.register(meta).unwrap();
 
         assert!(registry.sig_to_archetype_mut(&signature).is_ok());
         assert!(registry.key_to_archetype_mut(&key).is_ok());

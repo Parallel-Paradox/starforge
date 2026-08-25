@@ -93,10 +93,10 @@ impl Archetype {
     ///
     /// Returns [`ArchetypeError::ArchetypeTooLarge`] if a single entity's bytes (all columns)
     /// exceed [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
-    pub fn new(meta: Arc<ArchetypeMeta>) -> Result<Self, ArchetypeError> {
+    pub fn new(meta: Arc<ArchetypeMeta>) -> Result<Self, Error> {
         let layout = ArchetypeChunkLayout::with_capacity(&meta, 1).map_err(|e| match e {
             LayoutError::BufferTooLarge { buffer_size, max } => {
-                ArchetypeError::ArchetypeTooLarge { per_entity_size: buffer_size, max }
+                Error::ArchetypeTooLarge { per_entity_size: buffer_size, max }
             }
         })?;
         let layout = Arc::new(layout);
@@ -198,7 +198,7 @@ impl Archetype {
 
 /// Errors returned when building an [`Archetype`].
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum ArchetypeError {
+pub enum Error {
     /// A single entity's bytes exceed the maximum buffer size.
     #[error("Size per entity ({per_entity_size}) exceeds maximum allowed ({max})")]
     ArchetypeTooLarge { per_entity_size: usize, max: usize },

@@ -7,7 +7,9 @@ pub struct EntityRegistry {
 /// A stable, generational reference to an entity in an [`EntityRegistry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityKey {
+    /// Slot index into the owning registry's internal storage.
     pub index: EntityIndex,
+    /// Bumped each time the slot is reused, invalidating older keys pointing at it.
     pub generation: EntityGeneration,
 }
 

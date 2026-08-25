@@ -1,3 +1,4 @@
+use crate::archetype::ArchetypeSignature;
 use crate::prelude::*;
 
 use std::cmp::Reverse;
@@ -56,6 +57,7 @@ impl ColumnEntry {
 /// Metadata describing an archetype's column layout.
 pub struct ArchetypeMeta {
     columns: Vec<ColumnEntry>,
+    signature: ArchetypeSignature,
     id_to_index: HashMap<TypeId, usize>,
 }
 
@@ -67,6 +69,8 @@ impl ArchetypeMeta {
     /// **component key index ascending**. Because this is a total order over the layout
     /// attributes, the resulting column order — and the archetype layout it later drives — is
     /// independent of the order in which `unsorted_columns` was passed in.
+    ///
+    /// The [`ArchetypeSignature`] is computed here and frozen alongside the columns.
     pub fn new(unsorted_columns: Vec<ColumnEntry>) -> Self {
         let mut keyed: Vec<((Reverse<usize>, Reverse<usize>, usize), TypeId, ColumnEntry)> =
             Vec::with_capacity(unsorted_columns.len());
@@ -88,7 +92,15 @@ impl ArchetypeMeta {
             columns.push(entry);
         }
 
-        Self { columns, id_to_index }
+        let signature = {
+            let mut signature = ArchetypeSignature::default();
+            for column in &columns {
+                signature.set(column.comp_key.index.as_usize());
+            }
+            signature
+        };
+
+        Self { columns, signature, id_to_index }
     }
 
     /// Columns in canonical order (see [`ArchetypeMeta::new`]).
@@ -104,6 +116,12 @@ impl ArchetypeMeta {
     /// Resolves `id` to its column entry directly, if present.
     pub fn column(&self, id: &TypeId) -> Option<&ColumnEntry> {
         self.column_index(id).map(|index| &self.columns[index])
+    }
+
+    /// The [`ArchetypeSignature`] identifying this archetype's component set, computed at
+    /// construction time.
+    pub fn signature(&self) -> &ArchetypeSignature {
+        &self.signature
     }
 }
 
@@ -249,6 +267,9 @@ mod tests {
                 assert_eq!(meta.column_index(id).unwrap(), index);
             }
         }
+
+        // The signature is a pure function of the component set, so both orders agree.
+        assert_eq!(forward.signature(), reversed.signature());
     }
 
     #[test]
@@ -290,5 +311,44 @@ mod tests {
             ColumnEntry::new(column.type_key, column.comp_key, &ctx.type_reg, &ctx.comp_reg);
 
         assert!(matches!(result, Err(Error::Component(_))));
+    }
+
+    #[test]
+    fn signature_is_built_at_construction() {
+        let ctx = TestContext::mock();
+        let meta = ArchetypeMeta::new(vec![
+            ctx.column(TypeId::of_script(1)), // comp index 0
+            ctx.column(TypeId::of_script(3)), // comp index 2
+            ctx.column(TypeId::of_script(5)), // comp index 4
+        ]);
+
+        let signature = meta.signature();
+
+        assert_eq!(signature.count(), 3);
+        for id in [
+            TypeId::of_script(1),
+            TypeId::of_script(3),
+            TypeId::of_script(5),
+        ] {
+            let index = ctx.comp_reg.id_to_key(&id).unwrap().index.as_usize();
+            assert!(signature.test(index), "bit {index} should be set");
+        }
+        for id in [
+            TypeId::of_script(2),
+            TypeId::of_script(4),
+            TypeId::of_script(6),
+            TypeId::of_script(7),
+        ] {
+            let index = ctx.comp_reg.id_to_key(&id).unwrap().index.as_usize();
+            assert!(!signature.test(index), "bit {index} should be clear");
+        }
+    }
+
+    #[test]
+    fn signature_of_empty_archetype_is_empty() {
+        let meta = ArchetypeMeta::new(Vec::new());
+
+        assert!(meta.signature().is_empty());
+        assert_eq!(meta.signature().count(), 0);
     }
 }
