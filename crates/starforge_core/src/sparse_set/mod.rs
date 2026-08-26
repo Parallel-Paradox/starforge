@@ -31,7 +31,7 @@ pub struct SparseSet {
 
 /// Non-`u32::MAX` slot index into a [`SparseSet`]'s sparse array, keyed by entity.
 ///
-/// Each live entity owns a `SparseIndex` that resolves to its current dense position
+/// Each live entity owns a [`SparseIndex`] that resolves to its current dense position
 /// through the set's `sparse_to_dense` mapping. Slots are recycled: removing an entity
 /// retires its sparse slot, and a later insertion may reuse it.
 #[repr(transparent)]
@@ -124,7 +124,7 @@ impl SparseSet {
     }
 
     /// Builds a `SparseSet` for `header`'s component type with a dense buffer
-    /// preallocated to hold at least `capacity` elements, sized and aligned from the
+    /// pre allocated to hold at least `capacity` elements, sized and aligned from the
     /// header.
     pub fn with_capacity(header: SparseSetHeader, capacity: usize) -> Self {
         let mut set = Self::new(header);
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn with_capacity_preallocates_at_least_the_requested_capacity() {
+    fn with_capacity_pre_allocates_at_least_the_requested_capacity() {
         let set = sparse_set_u32(8);
 
         assert_eq!(set.len(), 0);
