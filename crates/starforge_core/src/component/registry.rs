@@ -8,8 +8,8 @@ use thiserror::Error;
 /// invalidation of keys.
 pub struct ComponentRegistry {
     id_to_key: HashMap<TypeId, ComponentKey>,
-    /// Slot table: `Some(key)` means live, `None` means retired/vacant waiting for reuse.
-    meta_entries: Vec<(Option<ComponentKey>, ComponentMeta)>,
+    /// Slot table: `Some((key, meta))` means live, `None` means retired/vacant waiting for reuse.
+    meta_entries: Vec<Option<(ComponentKey, ComponentMeta)>>,
     retired_keys: Vec<ComponentKey>,
 }
 
@@ -95,7 +95,7 @@ impl ComponentRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.meta_entries[retired_key.index.as_usize()] = (Some(retired_key), meta);
+            self.meta_entries[retired_key.index.as_usize()] = Some((retired_key, meta));
             retired_key
         } else {
             let key = ComponentKey {
@@ -104,12 +104,13 @@ impl ComponentRegistry {
                 // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
                 generation: ComponentGeneration::new(0).unwrap(),
             };
-            self.meta_entries.push((Some(key), meta));
+            self.meta_entries.push(Some((key, meta)));
             key
         };
         self.id_to_key.insert(type_id, key);
         tracing::trace!(
-            ?type_id, ?key, meta = ?self.meta_entries[key.index.as_usize()].1,
+            ?type_id, ?key,
+            meta = ?self.meta_entries[key.index.as_usize()].as_ref().expect("just registered").1,
             "ComponentRegistry::register created new entry"
         );
         key
@@ -127,10 +128,11 @@ impl ComponentRegistry {
 
         self.id_to_key.remove(&type_id);
 
-        let entry = &mut self.meta_entries[key.index.as_usize()];
-        let retired_key = ComponentKey { index: key.index, generation: key.generation.next() };
-        entry.0 = None;
-        self.retired_keys.push(retired_key);
+        // `key_to_meta` above guarantees this slot is live; replacing the entry with
+        // `None` drops the metadata together with the key.
+        self.meta_entries[key.index.as_usize()] = None;
+        self.retired_keys
+            .push(ComponentKey { index: key.index, generation: key.generation.next() });
 
         Ok(())
     }
@@ -148,12 +150,11 @@ impl ComponentRegistry {
 
     /// Resolves `key` to its `ComponentMeta`, validating that its generation is still current.
     pub fn key_to_meta(&self, key: &ComponentKey) -> Result<&ComponentMeta, Error> {
-        let (stored_key, meta) =
-            self.meta_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
-                index: key.index.get(),
-                bounds: self.meta_entries.len(),
-            })?;
-        if let Some(stored_key) = stored_key {
+        let entry = self.meta_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
+            index: key.index.get(),
+            bounds: self.meta_entries.len(),
+        })?;
+        if let Some((stored_key, meta)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
                     expected: stored_key.generation.get(),

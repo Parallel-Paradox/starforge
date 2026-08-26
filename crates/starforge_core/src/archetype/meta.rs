@@ -55,6 +55,7 @@ impl ColumnEntry {
 }
 
 /// Metadata describing an archetype's column layout.
+#[derive(Default)]
 pub struct ArchetypeMeta {
     columns: Vec<ColumnEntry>,
     signature: ArchetypeSignature,

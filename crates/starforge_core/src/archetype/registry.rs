@@ -17,8 +17,8 @@ pub type ArchetypeSignature = BitSignature;
 /// Registry for archetypes keyed by [`ArchetypeSignature`].
 pub struct ArchetypeRegistry {
     sig_to_key: HashMap<ArchetypeSignature, ArchetypeKey>,
-    /// Slot table: `Some(key)` means live, `None` means retired/vacant waiting for reuse.
-    archetype_entries: Vec<(Option<ArchetypeKey>, Archetype)>,
+    /// Slot table: `Some((key, archetype))` means live, `None` means retired/vacant waiting for reuse.
+    archetype_entries: Vec<Option<(ArchetypeKey, Archetype)>>,
     retired_keys: Vec<ArchetypeKey>,
 }
 
@@ -112,7 +112,7 @@ impl ArchetypeRegistry {
         let archetype = Archetype::new(meta)?;
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.archetype_entries[retired_key.index.as_usize()] = (Some(retired_key), archetype);
+            self.archetype_entries[retired_key.index.as_usize()] = Some((retired_key, archetype));
             retired_key
         } else {
             let key = ArchetypeKey {
@@ -121,7 +121,7 @@ impl ArchetypeRegistry {
                 // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
                 generation: ArchetypeGeneration::new(0).unwrap(),
             };
-            self.archetype_entries.push((Some(key), archetype));
+            self.archetype_entries.push(Some((key, archetype)));
             key
         };
         self.sig_to_key.insert(signature, key);
@@ -137,10 +137,11 @@ impl ArchetypeRegistry {
 
         self.sig_to_key.retain(|_, stored_key| *stored_key != key);
 
-        let entry = &mut self.archetype_entries[key.index.as_usize()];
-        let retired_key = ArchetypeKey { index: key.index, generation: key.generation.next() };
-        entry.0 = None;
-        self.retired_keys.push(retired_key);
+        // `key_to_archetype` above guarantees this slot is live; replacing the entry with
+        // `None` drops the archetype together with the key.
+        self.archetype_entries[key.index.as_usize()] = None;
+        self.retired_keys
+            .push(ArchetypeKey { index: key.index, generation: key.generation.next() });
 
         Ok(())
     }
@@ -170,24 +171,30 @@ impl ArchetypeRegistry {
     /// Resolves `key` to its [`Archetype`], validating that its generation is still current.
     pub fn key_to_archetype(&self, key: &ArchetypeKey) -> Result<&Archetype, Error> {
         let index = self.key_to_index(key)?;
-        Ok(&self.archetype_entries[index].1)
+        let entry = self.archetype_entries[index]
+            .as_ref()
+            .expect("key_to_index validated the slot as live");
+        Ok(&entry.1)
     }
 
     /// Resolves `key` to a mutable [`Archetype`], validating that its generation is still current.
     pub fn key_to_archetype_mut(&mut self, key: &ArchetypeKey) -> Result<&mut Archetype, Error> {
         let index = self.key_to_index(key)?;
-        Ok(&mut self.archetype_entries[index].1)
+        let entry = self.archetype_entries[index]
+            .as_mut()
+            .expect("key_to_index validated the slot as live");
+        Ok(&mut entry.1)
     }
 
     fn key_to_index(&self, key: &ArchetypeKey) -> Result<usize, Error> {
-        let (stored_key, _) =
+        let entry =
             self.archetype_entries
                 .get(key.index.as_usize())
                 .ok_or(Error::IndexOutOfBounds {
                     index: key.index.get(),
                     bounds: self.archetype_entries.len(),
                 })?;
-        if let Some(stored_key) = stored_key {
+        if let Some((stored_key, _)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
                     expected: stored_key.generation.get(),

@@ -104,6 +104,11 @@ impl Archetype {
         Ok(Self { meta, chunks: vec![chunk], entity_keys: Vec::new() })
     }
 
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+        self.entity_keys.clear();
+    }
+
     /// Reserves capacity for at least `additional` more entities, so subsequent insertions
     /// do not reallocate.
     ///

@@ -8,8 +8,8 @@ use thiserror::Error;
 /// invalidation of keys.
 pub struct TypeRegistry {
     id_to_key: HashMap<TypeId, TypeKey>,
-    /// Slot table: `Some(key)` means live, `None` means retired/vacant waiting for reuse.
-    meta_entries: Vec<(Option<TypeKey>, TypeMeta)>,
+    /// Slot table: `Some((key, meta))` means live, `None` means retired/vacant waiting for reuse.
+    meta_entries: Vec<Option<(TypeKey, TypeMeta)>>,
     retired_keys: Vec<TypeKey>,
 }
 
@@ -93,7 +93,9 @@ impl TypeRegistry {
     pub fn register(&mut self, meta: TypeMeta) -> TypeKey {
         let id = meta.id;
         if let Some(&existing_key) = self.id_to_key.get(&id) {
-            let stored_meta = &mut self.meta_entries[existing_key.index.as_usize()].1;
+            // `id_to_key` guarantees this slot is live.
+            let entry = &mut self.meta_entries[existing_key.index.as_usize()];
+            let stored_meta = &mut entry.as_mut().expect("id_to_key validated the slot as live").1;
             debug_assert_eq!(
                 *stored_meta, meta,
                 "TypeMeta mismatch: {id:?} was already registered with different metadata"
@@ -110,7 +112,7 @@ impl TypeRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.meta_entries[retired_key.index.as_usize()] = (Some(retired_key), meta);
+            self.meta_entries[retired_key.index.as_usize()] = Some((retired_key, meta));
             retired_key
         } else {
             let key = TypeKey {
@@ -119,12 +121,13 @@ impl TypeRegistry {
                 // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
                 generation: TypeGeneration::new(0).unwrap(),
             };
-            self.meta_entries.push((Some(key), meta));
+            self.meta_entries.push(Some((key, meta)));
             key
         };
         self.id_to_key.insert(id, key);
         tracing::trace!(
-            ?id, ?key, meta = ?self.meta_entries[key.index.as_usize()].1,
+            ?id, ?key,
+            meta = ?self.meta_entries[key.index.as_usize()].as_ref().expect("just registered").1,
             "TypeRegistry::register created new entry"
         );
         key
@@ -139,10 +142,11 @@ impl TypeRegistry {
 
         self.id_to_key.remove(&id);
 
-        let entry = &mut self.meta_entries[key.index.as_usize()];
-        let retired_key = TypeKey { index: key.index, generation: key.generation.next() };
-        entry.0 = None;
-        self.retired_keys.push(retired_key);
+        // `key_to_meta` above guarantees this slot is live; replacing the entry with
+        // `None` drops the metadata together with the key.
+        self.meta_entries[key.index.as_usize()] = None;
+        self.retired_keys
+            .push(TypeKey { index: key.index, generation: key.generation.next() });
 
         Ok(())
     }
@@ -160,12 +164,11 @@ impl TypeRegistry {
 
     /// Resolves `key` to its `TypeMeta`, validating that its generation is still current.
     pub fn key_to_meta(&self, key: &TypeKey) -> Result<&TypeMeta, Error> {
-        let (stored_key, meta) =
-            self.meta_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
-                index: key.index.get(),
-                bounds: self.meta_entries.len(),
-            })?;
-        if let Some(stored_key) = stored_key {
+        let entry = self.meta_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
+            index: key.index.get(),
+            bounds: self.meta_entries.len(),
+        })?;
+        if let Some((stored_key, meta)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
                     expected: stored_key.generation.get(),

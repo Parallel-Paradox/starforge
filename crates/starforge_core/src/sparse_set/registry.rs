@@ -8,8 +8,8 @@ use thiserror::Error;
 /// generation-based invalidation of keys.
 pub struct SparseSetRegistry {
     id_to_key: HashMap<TypeId, SparseSetKey>,
-    /// Slot table: `Some(key)` means live, `None` means retired/vacant waiting for reuse.
-    set_entries: Vec<(Option<SparseSetKey>, SparseSet)>,
+    /// Slot table: `Some((key, set))` means live, `None` means retired/vacant waiting for reuse.
+    set_entries: Vec<Option<(SparseSetKey, SparseSet)>>,
     retired_keys: Vec<SparseSetKey>,
 }
 
@@ -95,7 +95,7 @@ impl SparseSetRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.set_entries[retired_key.index.as_usize()] = (Some(retired_key), set);
+            self.set_entries[retired_key.index.as_usize()] = Some((retired_key, set));
             retired_key
         } else {
             let key = SparseSetKey {
@@ -104,7 +104,7 @@ impl SparseSetRegistry {
                 // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
                 generation: SparseSetGeneration::new(0).unwrap(),
             };
-            self.set_entries.push((Some(key), set));
+            self.set_entries.push(Some((key, set)));
             key
         };
         self.id_to_key.insert(type_id, key);
@@ -120,10 +120,11 @@ impl SparseSetRegistry {
 
         self.id_to_key.retain(|_, stored_key| *stored_key != key);
 
-        let entry = &mut self.set_entries[key.index.as_usize()];
-        let retired_key = SparseSetKey { index: key.index, generation: key.generation.next() };
-        entry.0 = None;
-        self.retired_keys.push(retired_key);
+        // `key_to_set` above guarantees this slot is live; replacing the entry with
+        // `None` drops the sparse set together with the key.
+        self.set_entries[key.index.as_usize()] = None;
+        self.retired_keys
+            .push(SparseSetKey { index: key.index, generation: key.generation.next() });
 
         Ok(())
     }
@@ -148,22 +149,26 @@ impl SparseSetRegistry {
     /// Resolves `key` to its [`SparseSet`], validating that its generation is still current.
     pub fn key_to_set(&self, key: &SparseSetKey) -> Result<&SparseSet, Error> {
         let index = self.key_to_index(key)?;
-        Ok(&self.set_entries[index].1)
+        let entry =
+            self.set_entries[index].as_ref().expect("key_to_index validated the slot as live");
+        Ok(&entry.1)
     }
 
     /// Resolves `key` to a mutable [`SparseSet`], validating that its generation is still current.
     pub fn key_to_set_mut(&mut self, key: &SparseSetKey) -> Result<&mut SparseSet, Error> {
         let index = self.key_to_index(key)?;
-        Ok(&mut self.set_entries[index].1)
+        let entry =
+            self.set_entries[index].as_mut().expect("key_to_index validated the slot as live");
+        Ok(&mut entry.1)
     }
 
     fn key_to_index(&self, key: &SparseSetKey) -> Result<usize, Error> {
-        let (stored_key, _) =
+        let entry =
             self.set_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
                 index: key.index.get(),
                 bounds: self.set_entries.len(),
             })?;
-        if let Some(stored_key) = stored_key {
+        if let Some((stored_key, _)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
                     expected: stored_key.generation.get(),

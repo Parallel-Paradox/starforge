@@ -1,18 +1,12 @@
 use core::fmt;
 use core::hash::{Hash, Hasher};
 
-/// A growable bitset used to identify a set of component types (e.g. an archetype signature).
-#[derive(Clone, Eq)]
+/// A dynamic bitset used to identify a set of component types (e.g. an archetype signature).
+#[derive(Default, Clone, Eq)]
 pub struct BitSignature(Vec<u64>);
 
 /// Number of bits stored in each backing word.
 pub const BITS_PER_WORD: usize = 64;
-
-impl Default for BitSignature {
-    fn default() -> Self {
-        Self(Vec::new())
-    }
-}
 
 impl BitSignature {
     /// Grows the backing storage, if needed, so that `bit` can be addressed.
