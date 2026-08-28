@@ -43,7 +43,7 @@ impl ArchetypeChunkLayout {
     ///
     /// # Errors
     ///
-    /// Returns [`ArchetypeChunkLayoutError::BufferTooLarge`] if the computed buffer size
+    /// Returns [`Error::BufferTooLarge`] if the computed buffer size
     /// exceeds [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
     pub fn with_capacity(meta: &ArchetypeMeta, capacity: usize) -> Result<Self, Error> {
         let mut columns_size = 0;
@@ -73,7 +73,7 @@ impl ArchetypeChunkLayout {
     ///
     /// # Errors
     ///
-    /// Returns [`ArchetypeChunkLayoutError::BufferTooLarge`] if `buffer_size` exceeds
+    /// Returns [`Error::BufferTooLarge`] if `buffer_size` exceeds
     /// [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
     pub fn with_buffer_size(meta: &ArchetypeMeta, buffer_size: usize) -> Result<Self, Error> {
         if buffer_size > Self::MAX_BUFFER_SIZE_BYTE {

@@ -102,7 +102,7 @@ impl ArchetypeRegistry {
     /// # Errors
     ///
     /// Returns [`ArchetypeError::ArchetypeTooLarge`] if a single entity's bytes exceed
-    /// [`ArchetypeChunkLayout::MAX_BUFFER_SIZE_BYTE`].
+    /// max buffer size.
     pub fn register(&mut self, meta: Arc<ArchetypeMeta>) -> Result<ArchetypeKey, ArchetypeError> {
         let signature = meta.signature().clone();
         if let Some(&existing_key) = self.sig_to_key.get(&signature) {

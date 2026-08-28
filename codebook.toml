@@ -1,4 +1,8 @@
 words = [
+    "ECS",
+    "OOM",
+    "SOA",
+    "ZST",
     "arities",
     "starforge",
 ]

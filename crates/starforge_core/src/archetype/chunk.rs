@@ -174,7 +174,7 @@ impl ArchetypeChunk {
     /// The caller must ensure no aliasing references exist and must not read or
     /// overwrite slots beyond `self.len` by assignment: they are uninitialized. Convert the
     /// pointer with [`NonNull::as_ptr`] for raw pointer operations (write or copy), and advance
-    /// `self.len` via [`Self::set_len`] so the safe getters see them.
+    /// `self.len` via [`Self::set_len`] so the safe getter see them.
     ///
     /// # Panics
     ///
@@ -364,8 +364,8 @@ mod tests {
         }
     }
 
-    /// Places distinct patterns into all columns via the raw-pointer getters (covering
-    /// the full capacity), then reads them back through the safe getters. Distinct
+    /// Places distinct patterns into all columns via the raw-pointer getter (covering
+    /// the full capacity), then reads them back through the safe getter. Distinct
     /// patterns mean any offset error or region overlap corrupts a read-back.
     #[test]
     fn round_trip_distinct_patterns() {
@@ -375,7 +375,7 @@ mod tests {
         let ctx = TestContext::mock();
         let mut chunk = ctx.chunk(ctx.meta(), CAPACITY);
 
-        // Placement via the raw-pointer getters. The slots are uninitialized, hence
+        // Placement via the raw-pointer getter. The slots are uninitialized, hence
         // `ptr::write` rather than assignment.
         unsafe {
             let column_0 = chunk.get_column_mut_ptr(0).as_ptr();
@@ -390,7 +390,7 @@ mod tests {
             chunk.set_len(LEN);
         }
 
-        // Safe getters expose only the first `len` elements, matching the writes.
+        // Safe getter expose only the first `len` elements, matching the writes.
         let column_0 = chunk.get_column(0);
         assert_eq!(column_0.len(), LEN * 8);
         for (i, byte) in column_0.iter().enumerate() {
@@ -425,7 +425,7 @@ mod tests {
         assert!(chunk.get_column(0).is_empty());
     }
 
-    /// Out-of-bounds column access panics, as documented on the getters.
+    /// Out-of-bounds column access panics, as documented on the getter.
     #[test]
     #[should_panic(expected = "out of bounds")]
     fn get_column_out_of_bounds_panics() {
@@ -486,7 +486,7 @@ mod tests {
 
         // SAFETY: writes only into the source's slots.
         unsafe {
-            // The chunked-mut getters expose exactly the first `len` rows, so the rows
+            // The chunked-mut getter expose exactly the first `len` rows, so the rows
             // must be declared live before they can be filled through
             // `get_column_chunks_mut`.
             source.set_len(3);

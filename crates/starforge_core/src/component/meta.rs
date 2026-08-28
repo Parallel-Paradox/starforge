@@ -9,6 +9,16 @@ pub enum ComponentKind {
     NonTrivial { drop_fn: unsafe fn(*mut u8) },
 }
 
+impl ComponentKind {
+    pub fn of<T: Component>() -> Self {
+        if std::mem::needs_drop::<T>() {
+            ComponentKind::NonTrivial { drop_fn: drop_in_place_erased::<T> }
+        } else {
+            ComponentKind::Trivial
+        }
+    }
+}
+
 /// Metadata describing a registered component: its underlying type and drop behavior.
 #[derive(Debug, Clone)]
 pub struct ComponentMeta {
@@ -27,13 +37,7 @@ impl Eq for ComponentMeta {}
 impl ComponentMeta {
     /// Builds `ComponentMeta` for component type `T`, deriving drop behavior from `Drop`.
     pub fn of<T: Component>() -> Self {
-        let kind = if std::mem::needs_drop::<T>() {
-            ComponentKind::NonTrivial { drop_fn: drop_in_place_erased::<T> }
-        } else {
-            ComponentKind::Trivial
-        };
-
-        Self::new(TypeId::of::<T>(), kind)
+        Self::new(TypeId::of::<T>(), ComponentKind::of::<T>())
     }
 
     /// Constructs `ComponentMeta` from explicit values.

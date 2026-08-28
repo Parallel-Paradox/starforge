@@ -193,7 +193,6 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prelude::*;
     use std::mem::size_of;
 
     #[derive(Component)]
