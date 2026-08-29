@@ -6,6 +6,7 @@ use thiserror::Error;
 
 /// Maps [`TypeId`]s to stable [`TypeKey`]s and their [`TypeMeta`], with generation-based
 /// invalidation of keys.
+#[derive(Default)]
 pub struct TypeRegistry {
     id_to_key: HashMap<TypeId, TypeKey>,
     /// Slot table: `Some((key, meta))` means live, `None` means retired/vacant waiting for reuse.
@@ -74,14 +75,6 @@ impl TypeGeneration {
         } else {
             Self::new(self.get() + 1).expect("next generation must be representable")
         }
-    }
-}
-
-impl Default for TypeRegistry {
-    /// Creates an empty registry.
-    fn default() -> Self {
-        tracing::trace!("TypeRegistry created.");
-        Self { id_to_key: HashMap::new(), meta_entries: Vec::new(), retired_keys: Vec::new() }
     }
 }
 

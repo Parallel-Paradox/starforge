@@ -14,6 +14,7 @@ use thiserror::Error;
 pub type ArchetypeSignature = BitSignature;
 
 /// Registry for archetypes keyed by [`ArchetypeSignature`].
+#[derive(Default)]
 pub struct ArchetypeRegistry {
     sig_to_key: HashMap<ArchetypeSignature, ArchetypeKey>,
     /// Slot table: `Some((key, archetype))` means live, `None` means retired/vacant waiting for reuse.
@@ -82,14 +83,6 @@ impl ArchetypeGeneration {
         } else {
             Self::new(self.get() + 1).expect("next generation must be representable")
         }
-    }
-}
-
-impl Default for ArchetypeRegistry {
-    /// Creates an empty registry.
-    fn default() -> Self {
-        tracing::trace!("ArchetypeRegistry created.");
-        Self { sig_to_key: HashMap::new(), archetype_entries: Vec::new(), retired_keys: Vec::new() }
     }
 }
 

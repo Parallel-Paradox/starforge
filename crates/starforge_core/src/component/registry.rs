@@ -6,6 +6,7 @@ use thiserror::Error;
 
 /// Maps [`TypeId`]s to stable [`ComponentKey`]s and their [`ComponentMeta`], with generation-based
 /// invalidation of keys.
+#[derive(Default)]
 pub struct ComponentRegistry {
     id_to_key: HashMap<TypeId, ComponentKey>,
     /// Slot table: `Some((key, meta))` means live, `None` means retired/vacant waiting for reuse.
@@ -74,14 +75,6 @@ impl ComponentGeneration {
         } else {
             Self::new(self.get() + 1).expect("next generation must be representable")
         }
-    }
-}
-
-impl Default for ComponentRegistry {
-    /// Creates an empty registry.
-    fn default() -> Self {
-        tracing::trace!("ComponentRegistry created.");
-        Self { id_to_key: HashMap::new(), meta_entries: Vec::new(), retired_keys: Vec::new() }
     }
 }
 

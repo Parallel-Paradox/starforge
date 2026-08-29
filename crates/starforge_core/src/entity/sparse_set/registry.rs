@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Maps [`TypeId`]s to stable [`SparseSetKey`]s and their [`SparseSet`]s, with
 /// generation-based invalidation of keys.
+#[derive(Default)]
 pub struct SparseSetRegistry {
     id_to_key: HashMap<TypeId, SparseSetKey>,
     /// Slot table: `Some((key, set))` means live, `None` means retired/vacant waiting for reuse.
@@ -75,14 +76,6 @@ impl SparseSetGeneration {
         } else {
             Self::new(self.get() + 1).expect("next generation must be representable")
         }
-    }
-}
-
-impl Default for SparseSetRegistry {
-    /// Creates an empty registry.
-    fn default() -> Self {
-        tracing::trace!("SparseSetRegistry created.");
-        Self { id_to_key: HashMap::new(), set_entries: Vec::new(), retired_keys: Vec::new() }
     }
 }
 
