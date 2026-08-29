@@ -1,3 +1,4 @@
+use super::SparseSet;
 use crate::prelude::*;
 
 use nonmax::NonMaxU32;
@@ -149,25 +150,26 @@ impl SparseSetRegistry {
     /// Resolves `key` to its [`SparseSet`], validating that its generation is still current.
     pub fn key_to_set(&self, key: &SparseSetKey) -> Result<&SparseSet, Error> {
         let index = self.key_to_index(key)?;
-        let entry =
-            self.set_entries[index].as_ref().expect("key_to_index validated the slot as live");
+        let entry = self.set_entries[index]
+            .as_ref()
+            .expect("key_to_index validated the slot as live");
         Ok(&entry.1)
     }
 
     /// Resolves `key` to a mutable [`SparseSet`], validating that its generation is still current.
     pub fn key_to_set_mut(&mut self, key: &SparseSetKey) -> Result<&mut SparseSet, Error> {
         let index = self.key_to_index(key)?;
-        let entry =
-            self.set_entries[index].as_mut().expect("key_to_index validated the slot as live");
+        let entry = self.set_entries[index]
+            .as_mut()
+            .expect("key_to_index validated the slot as live");
         Ok(&mut entry.1)
     }
 
     fn key_to_index(&self, key: &SparseSetKey) -> Result<usize, Error> {
-        let entry =
-            self.set_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
-                index: key.index.get(),
-                bounds: self.set_entries.len(),
-            })?;
+        let entry = self.set_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
+            index: key.index.get(),
+            bounds: self.set_entries.len(),
+        })?;
         if let Some((stored_key, _)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
@@ -208,7 +210,7 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::component::{ComponentKind, ComponentMeta};
-    use crate::sparse_set::SparseSetHeader;
+    use crate::entity::sparse_set::SparseSetHeader;
     use crate::types::TypeMeta;
     use std::mem::size_of;
 

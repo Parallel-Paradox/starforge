@@ -1,12 +1,16 @@
 mod registry;
 
+pub mod archetype;
+pub mod sparse_set;
+
 use std::collections::HashMap;
 
 pub use registry::{EntityGeneration, EntityIndex, EntityKey, EntityRegistry};
 
 use crate::component::ComponentParcel;
 use crate::prelude::*;
-use crate::sparse_set::SparseIndex;
+use archetype::ArchetypeKey;
+use sparse_set::{SparseIndex, SparseSetKey};
 
 pub type EntitySignature = crate::tool::BitSignature;
 

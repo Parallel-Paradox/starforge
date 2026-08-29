@@ -1,4 +1,4 @@
-use crate::archetype::ArchetypeSignature;
+use super::ArchetypeSignature;
 use crate::prelude::*;
 
 use std::cmp::Reverse;

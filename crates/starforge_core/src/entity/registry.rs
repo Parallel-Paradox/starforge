@@ -1,7 +1,8 @@
 use nonmax::NonMaxU32;
 
 pub struct EntityRegistry {
-    // TODO
+    // arche_reg: ArchetypeRegistry,
+    // sparse_reg: SparseSetRegistry,
 }
 
 /// A stable, generational reference to an entity in an [`EntityRegistry`].

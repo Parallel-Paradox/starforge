@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::archetype::{ArchetypeMeta, Error as ArchetypeError};
-use crate::prelude::*;
+use super::{Archetype, ArchetypeMeta, Error as ArchetypeError};
 use crate::tool::BitSignature;
 use nonmax::NonMaxU32;
 use thiserror::Error;
@@ -233,7 +232,8 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archetype::{ArchetypeMeta, ColumnEntry};
+    use crate::entity::archetype::{ArchetypeMeta, ColumnEntry};
+    use crate::prelude::*;
     use std::mem::size_of;
     use std::sync::Arc;
 

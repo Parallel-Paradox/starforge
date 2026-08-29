@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::archetype::ArchetypeMeta;
+use super::ArchetypeMeta;
 
 /// The byte layout of an archetype's chunk buffer.
 /// The buffer is a SOA (structure-of-arrays) containing component columns data.
@@ -120,8 +120,8 @@ mod tests {
     use super::*;
     use crate::prelude::*;
     use crate::{
-        archetype::meta::ColumnEntry,
         component::{ComponentKind, ComponentMeta, ComponentRegistry},
+        entity::archetype::meta::ColumnEntry,
         types::{TypeId, TypeMeta, TypeRegistry},
     };
 

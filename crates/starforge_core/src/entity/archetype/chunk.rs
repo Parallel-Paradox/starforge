@@ -5,10 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    archetype::{ArchetypeChunkLayout, ArchetypeMeta},
-    prelude::*,
-};
+use super::{ArchetypeChunkLayout, ArchetypeMeta};
+use crate::prelude::*;
 
 /// A contiguous chunk of memory holding the component data for a set of entities.
 pub struct ArchetypeChunk {
@@ -252,7 +250,7 @@ impl ArchetypeChunk {
 mod tests {
     use super::*;
 
-    use crate::{archetype::ColumnEntry, macros::Component};
+    use crate::{entity::archetype::ColumnEntry, macros::Component};
 
     use std::sync::{
         Arc,
