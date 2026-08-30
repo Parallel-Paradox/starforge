@@ -7,10 +7,10 @@ use std::collections::HashMap;
 
 pub use registry::{EntityGeneration, EntityIndex, EntityKey, EntityRegistry};
 
-use crate::component::ComponentParcel;
 use crate::prelude::*;
 use archetype::ArchetypeKey;
 use sparse_set::{SparseIndex, SparseSetKey};
+use starforge_reflect::basic::Parcel;
 
 pub type EntitySignature = crate::tool::BitSignature;
 
@@ -27,16 +27,16 @@ pub struct Entity {
 }
 
 #[derive(Default)]
-pub struct EntityBuilder(HashMap<TypeId, ComponentParcel>);
+pub struct EntityBuilder(HashMap<TypeId, Parcel>);
 
 impl EntityBuilder {
     pub fn insert<T: Component>(&mut self, component: T) -> Option<T> {
-        self.insert_impl(TypeId::of::<T>(), ComponentParcel::new(component))
+        self.insert_impl(TypeId::of::<T>(), Parcel::new(component))
             // SAFETY: popped by the same TypeId
             .map(|parcel| unsafe { parcel.take() })
     }
 
-    pub fn insert_impl(&mut self, id: TypeId, parcel: ComponentParcel) -> Option<ComponentParcel> {
+    pub fn insert_impl(&mut self, id: TypeId, parcel: Parcel) -> Option<Parcel> {
         self.0.insert(id, parcel)
     }
 
@@ -45,7 +45,7 @@ impl EntityBuilder {
         self.remove_impl(id).map(|parcel| unsafe { parcel.take() })
     }
 
-    pub fn remove_impl(&mut self, id: &TypeId) -> Option<ComponentParcel> {
+    pub fn remove_impl(&mut self, id: &TypeId) -> Option<Parcel> {
         self.0.remove(id)
     }
 }
