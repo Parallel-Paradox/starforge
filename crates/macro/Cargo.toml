@@ -9,3 +9,4 @@ proc-macro = true
 [dependencies]
 syn = "3.0"
 quote = "1.0"
+starforge_macro_util = { path = "../macro_util" }

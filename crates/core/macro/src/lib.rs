@@ -1,4 +1,4 @@
-// MSVC's linker prints an informational "Creating library ... and object ..."
+// Linker in MSVC prints an informational "Creating library ... and object ..."
 // line to stdout when building this proc-macro's dll; silence the resulting lint.
 #![allow(linker_messages)]
 
