@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 starforge_core_macro = { path = "./macro" }
+starforge_macro = { path = "../macro" }
 starforge_reflect = { path = "../reflect" }
 
 tracing = "0.1"

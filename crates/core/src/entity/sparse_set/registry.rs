@@ -1,5 +1,5 @@
 use super::SparseSet;
-use crate::prelude::*;
+use starforge_reflect::prelude::TypeId;
 
 use nonmax::NonMaxU32;
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ impl SparseSetRegistry {
     /// Registers `set`, returning a stable [`SparseSetKey`]. Re-registering the same `TypeId`
     /// returns the existing key and keeps the existing sparse set unchanged.
     pub fn register(&mut self, set: SparseSet) -> SparseSetKey {
-        let type_id = set.header().type_id;
+        let type_id = set.meta().id();
         if let Some(&existing_key) = self.id_to_key.get(&type_id) {
             return existing_key;
         }
@@ -202,19 +202,11 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{ComponentKind, ComponentMeta};
-    use crate::entity::sparse_set::SparseSetHeader;
-    use crate::types::TypeMeta;
+    use starforge_reflect::prelude::TypeMeta;
     use std::mem::size_of;
 
     fn sparse_set_u32() -> SparseSet {
-        let mut type_reg = TypeRegistry::default();
-        let mut comp_reg = ComponentRegistry::default();
-        let id = TypeId::of::<u32>();
-        let type_key = type_reg.register(TypeMeta::of::<u32>());
-        let comp_key = comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
-        let header = SparseSetHeader::new(type_key, comp_key, &type_reg, &comp_reg).unwrap();
-        SparseSet::with_capacity(header, 0)
+        SparseSet::with_capacity(TypeMeta::new::<u32>(), 0)
     }
 
     #[test]
