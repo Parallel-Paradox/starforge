@@ -62,8 +62,10 @@ impl ArchetypeGeneration {
     }
 
     /// Advances to the next generation, wrapping from `u32::MAX - 1` to `0`.
+    /// Risk: wrapping reuses generations, so a stale key may become valid again.
     pub fn next(self) -> Self {
         if self.get() == u32::MAX - 1 {
+            tracing::warn!("ArchetypeGeneration wrapped to 0");
             // `0` is always representable because only `u32::MAX` is rejected by `NonMaxU32`.
             Self::new(0).unwrap()
         } else {
