@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{ArchetypeChunkLayout, ArchetypeMeta};
-use crate::prelude::*;
+use starforge_reflect::basic::meta::NeedsDrop;
 
 /// A contiguous chunk of memory holding the component data for a set of entities.
 pub struct ArchetypeChunk {
@@ -43,15 +43,15 @@ impl ArchetypeChunk {
             return;
         }
 
-        for (index, column) in self.meta.columns().iter().enumerate() {
-            let ComponentKind::NonTrivial { drop_fn } = column.comp_kind else {
+        for (index, (_, column_meta)) in self.meta.columns().iter().enumerate() {
+            let NeedsDrop::NonTrivial { drop_fn } = *column_meta.needs_drop() else {
                 continue;
             };
 
             unsafe {
                 let elements = self.buf_ptr.as_ptr().add(self.layout.column_offsets()[index]);
                 for i in 0..self.len {
-                    drop_fn(elements.add(i * column.stride));
+                    drop_fn(elements.add(i * self.meta.column_size(index)));
                 }
             }
         }
@@ -102,7 +102,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column(&self, index: usize) -> &[u8] {
-        let element_size = self.meta.columns()[index].stride;
+        let element_size = self.meta.column_size(index);
         let offset = self.layout.column_offsets()[index];
         // SAFETY: the `index`-th column array starts at `offset` and holds `capacity`
         // elements of `element_size` bytes; `len <= capacity` keeps the
@@ -124,7 +124,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column_mut(&mut self, index: usize) -> &mut [u8] {
-        let element_size = self.meta.columns()[index].stride;
+        let element_size = self.meta.column_size(index);
         let offset = self.layout.column_offsets()[index];
         // SAFETY: the `index`-th column array starts at `offset` and holds `capacity`
         // elements of `element_size` bytes; `len <= capacity` keeps the
@@ -146,7 +146,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column_chunks(&self, index: usize) -> ChunksExact<'_, u8> {
-        self.get_column(index).chunks_exact(self.meta.columns()[index].stride)
+        self.get_column(index).chunks_exact(self.meta.column_size(index))
     }
 
     /// Returns a mutable iterator over the `index`-th column's valid entities, one
@@ -160,7 +160,7 @@ impl ArchetypeChunk {
     ///
     /// Panics if `index` is out of bounds of the archetype's columns.
     pub fn get_column_chunks_mut(&mut self, index: usize) -> ChunksExactMut<'_, u8> {
-        let element_size = self.meta.columns()[index].stride;
+        let element_size = self.meta.column_size(index);
         self.get_column_mut(index).chunks_exact_mut(element_size)
     }
 
@@ -190,17 +190,20 @@ impl ArchetypeChunk {
     ///
     /// # Safety
     ///
-    /// `self` and `other` must share the same `meta`, have enough capacity and distinct
-    /// allocations.
+    /// `self` and `other` must have matching component signatures (see
+    /// [`ArchetypeMeta::signature`]), have enough capacity and distinct allocations.
     pub unsafe fn move_data_into(&mut self, other: &mut Self) {
-        debug_assert!(Arc::ptr_eq(&self.meta, &other.meta), "chunks must share meta");
+        debug_assert!(
+            self.meta.signature() == other.meta.signature(),
+            "chunks must have matching signatures"
+        );
         debug_assert!(
             other.layout.capacity() >= self.len,
             "target chunk is smaller than the source's live count"
         );
 
-        for (index, column) in self.meta.columns().iter().enumerate() {
-            let bytes = self.len * column.stride;
+        for (index, _) in self.meta.columns().iter().enumerate() {
+            let bytes = self.len * self.meta.column_size(index);
             // SAFETY: both pointers are the starts of the `index`-th column array in
             // their own allocations (each chunk's offset is scaled by its own
             // capacity), and `self.len <= other.layout.capacity()` keeps the copy
@@ -228,16 +231,16 @@ impl ArchetypeChunk {
 
         // Each column offset must be the cumulative size of the columns before it.
         let mut columns_size = 0;
-        for (offset, column) in layout.column_offsets().iter().zip(meta.columns()) {
+        for (index, offset) in layout.column_offsets().iter().enumerate() {
             debug_assert_eq!(
                 *offset, columns_size,
                 "meta and layout disagree on column offset {offset}"
             );
-            columns_size += column.stride * layout.capacity();
+            columns_size += meta.column_size(index) * layout.capacity();
         }
 
         // Buffer alignment follows the first (largest-aligned) column, or 1 when empty.
-        let expected_align = meta.columns().first().map(|column| column.align).unwrap_or(1);
+        let expected_align = meta.columns().first().map(|_| meta.column_align(0)).unwrap_or(1);
         debug_assert_eq!(
             layout.buffer_align(),
             expected_align,
@@ -250,8 +253,11 @@ impl ArchetypeChunk {
 mod tests {
     use super::*;
 
-    use crate::{entity::archetype::ColumnEntry, macros::Component};
-
+    use crate::macros::Component;
+    use crate::prelude::{ComponentKey, ComponentRegistry};
+    use starforge_reflect::basic::meta::NeedsDrop;
+    use starforge_reflect::prelude::{TypeId, TypeMeta, TypeName};
+    use std::alloc::Layout;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -286,66 +292,64 @@ mod tests {
         }
     }
 
-    fn columns() -> [TypeMeta; 2] {
-        [
-            TypeMeta::new(TypeId::of_script(1), 8, 8, TypeName::of_script("column_0")),
-            TypeMeta::new(TypeId::of_script(2), 4, 4, TypeName::of_script("column_1")),
-        ]
-    }
+    /// Script column (id, size, align) triples registered by [`TestContext::mock`], in
+    /// registration order (component key index 0 and 1). `ArchetypeMeta::new` reorders them
+    /// by alignment descending, so column 0 (align 8, size 8) comes first and column 1
+    /// (align 4, size 4) second.
+    const COLUMNS: [(TypeId, usize, usize); 2] =
+        [(TypeId::of_script(1), 8, 8), (TypeId::of_script(2), 4, 4)];
 
-    /// Owns the registries backing the columns under test, so keys derived from them stay
+    /// Owns the registry backing the columns under test, so keys derived from it stay
     /// resolvable for the lifetime of the context.
     struct TestContext {
-        type_reg: TypeRegistry,
         comp_reg: ComponentRegistry,
     }
 
     impl TestContext {
         /// Builds a context holding the [`COLUMNS`] registrations, in registration order.
         pub fn mock() -> Self {
-            let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
-
-            for column in columns() {
-                type_reg.register(column.clone());
-                comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
+            for (id, size, align) in COLUMNS {
+                comp_reg.register(TypeMeta::new_impl(
+                    id,
+                    TypeName::of_script("test"),
+                    NeedsDrop::Trivial,
+                    Layout::from_size_align(size, align).unwrap(),
+                ));
             }
-
-            Self { type_reg, comp_reg }
+            Self { comp_reg }
         }
 
         /// Builds a context for the tracker tests: a non-trivial `Tracked` (16 bytes,
-        /// 8-align) and a trivial `u64` (8 bytes, 8-align).
+        /// 8-align) and a trivial u64-sized script column (8 bytes, 8-align).
         pub fn mock_tracked() -> Self {
-            let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
-            type_reg.register(TypeMeta::of::<Tracked>());
-            let trivial = TypeMeta::new(TypeId::of_script(1), 8, 8, TypeName::of_script("trivial"));
-            type_reg.register(trivial);
-            comp_reg.register(ComponentMeta::of::<Tracked>());
-            comp_reg.register(ComponentMeta::new(TypeId::of_script(1), ComponentKind::Trivial));
-            Self { type_reg, comp_reg }
+            comp_reg.register(TypeMeta::new::<Tracked>());
+            comp_reg.register(TypeMeta::new_impl(
+                TypeId::of_script(1),
+                TypeName::of_script("trivial"),
+                NeedsDrop::Trivial,
+                Layout::from_size_align(8, 8).unwrap(),
+            ));
+            Self { comp_reg }
         }
 
-        pub fn column(&self, id: TypeId) -> ColumnEntry {
-            let type_key = *self.type_reg.id_to_key(&id).unwrap();
-            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
+        /// Builds an `ArchetypeMeta` over the columns keyed by `ids`, in the given order.
+        fn meta_with(&self, ids: &[TypeId]) -> ArchetypeMeta {
+            let keys: Vec<ComponentKey> =
+                ids.iter().map(|id| *self.comp_reg.id_to_key(id).unwrap()).collect();
+            ArchetypeMeta::new(&keys, &self.comp_reg).unwrap()
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
-            ArchetypeMeta::new(columns().iter().map(|c| self.column(c.id)).collect())
+            self.meta_with(&COLUMNS.map(|(id, _, _)| id))
         }
 
         /// Builds the two-column meta used by the tracker tests over this context's
         /// registrations.
         pub fn tracked_meta(&self) -> Arc<ArchetypeMeta> {
-            let tracked_id = TypeId::of::<Tracked>();
-            let trivial_id = TypeId::of_script(1);
-            Arc::new(ArchetypeMeta::new(Vec::from(
-                [tracked_id, trivial_id].map(|id| self.column(id)),
-            )))
+            Arc::new(self.meta_with(&[TypeId::of::<Tracked>(), TypeId::of_script(1)]))
         }
 
         /// Builds a chunk over `meta`.
@@ -407,9 +411,10 @@ mod tests {
     /// An empty-metadata chunk has no column views but can still track logical length.
     #[test]
     fn empty_meta_tracks_len_without_columns() {
-        let ctx = TestContext::mock();
-        let meta = ArchetypeMeta::new(vec![]);
-        let mut chunk = ctx.chunk(meta, 8);
+        let comp_reg = ComponentRegistry::default();
+        let meta = ArchetypeMeta::new(&[], &comp_reg).unwrap();
+        let layout = ArchetypeChunkLayout::with_capacity(&meta, 8).unwrap();
+        let mut chunk = ArchetypeChunk::new(Arc::new(meta), Arc::new(layout));
 
         unsafe { chunk.set_len(3) };
         assert_eq!(chunk.len(), 3);

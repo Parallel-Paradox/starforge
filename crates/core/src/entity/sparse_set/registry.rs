@@ -1,4 +1,5 @@
 use super::SparseSet;
+use starforge_macro::Deref;
 use starforge_reflect::prelude::TypeId;
 
 use nonmax::NonMaxU32;
@@ -26,12 +27,12 @@ pub struct SparseSetKey {
 
 /// Non-`u32::MAX` slot index for entries inside a [`SparseSetRegistry`].
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct SparseSetIndex(NonMaxU32);
 
 /// Non-`u32::MAX` generation token attached to a [`SparseSetKey`].
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct SparseSetGeneration(NonMaxU32);
 
 impl SparseSetIndex {
@@ -45,27 +46,12 @@ impl SparseSetIndex {
         let value = u32::try_from(value).ok()?;
         Self::new(value)
     }
-
-    /// Returns the raw `u32` value.
-    pub fn get(self) -> u32 {
-        self.0.get()
-    }
-
-    /// Returns this index as a `usize` for indexing vectors.
-    pub fn as_usize(self) -> usize {
-        self.get() as usize
-    }
 }
 
 impl SparseSetGeneration {
     /// Creates a generation from a raw `u32`, rejecting `u32::MAX`.
     pub fn new(value: u32) -> Option<Self> {
         NonMaxU32::new(value).map(Self)
-    }
-
-    /// Returns the raw `u32` value.
-    pub fn get(self) -> u32 {
-        self.0.get()
     }
 
     /// Advances to the next generation, wrapping from `u32::MAX - 1` to `0`.
@@ -89,7 +75,7 @@ impl SparseSetRegistry {
         }
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.set_entries[retired_key.index.as_usize()] = Some((retired_key, set));
+            self.set_entries[retired_key.index.get() as usize] = Some((retired_key, set));
             retired_key
         } else {
             let key = SparseSetKey {
@@ -116,7 +102,7 @@ impl SparseSetRegistry {
 
         // `key_to_set` above guarantees this slot is live; replacing the entry with
         // `None` drops the sparse set together with the key.
-        self.set_entries[key.index.as_usize()] = None;
+        self.set_entries[key.index.get() as usize] = None;
         self.retired_keys
             .push(SparseSetKey { index: key.index, generation: key.generation.next() });
 
@@ -159,10 +145,11 @@ impl SparseSetRegistry {
     }
 
     fn key_to_index(&self, key: &SparseSetKey) -> Result<usize, Error> {
-        let entry = self.set_entries.get(key.index.as_usize()).ok_or(Error::IndexOutOfBounds {
-            index: key.index.get(),
-            bounds: self.set_entries.len(),
-        })?;
+        let entry =
+            self.set_entries.get(key.index.get() as usize).ok_or(Error::IndexOutOfBounds {
+                index: key.index.get(),
+                bounds: self.set_entries.len(),
+            })?;
         if let Some((stored_key, _)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
@@ -170,7 +157,7 @@ impl SparseSetRegistry {
                     actual: key.generation.get(),
                 });
             }
-            return Ok(key.index.as_usize());
+            return Ok(key.index.get() as usize);
         }
 
         let expected = self

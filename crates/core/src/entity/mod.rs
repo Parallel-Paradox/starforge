@@ -7,10 +7,11 @@ use std::collections::HashMap;
 
 pub use registry::{EntityGeneration, EntityIndex, EntityKey, EntityRegistry};
 
-use crate::prelude::*;
+use crate::prelude::Component;
 use archetype::ArchetypeKey;
 use sparse_set::{SparseIndex, SparseSetKey};
 use starforge_reflect::basic::Parcel;
+use starforge_reflect::prelude::TypeId;
 
 pub type EntitySignature = crate::tool::BitSignature;
 

@@ -1,9 +1,7 @@
-mod meta;
 mod registry;
 
 use std::any::Any;
 
-pub use meta::{ComponentKind, ComponentMeta};
 pub use registry::{ComponentGeneration, ComponentIndex, ComponentKey, ComponentRegistry, Error};
 
 /// Marker trait for component types. Use `#[derive(Component)]` as convenience access.

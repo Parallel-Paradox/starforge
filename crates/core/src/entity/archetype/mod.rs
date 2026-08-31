@@ -8,7 +8,7 @@ use thiserror::Error;
 
 pub use chunk::ArchetypeChunk;
 pub use layout::{ArchetypeChunkLayout, Error as LayoutError};
-pub use meta::{ArchetypeMeta, ColumnEntry, Error as MetaError};
+pub use meta::{ArchetypeMeta, ColumnEntry};
 pub use registry::{
     ArchetypeGeneration, ArchetypeIndex, ArchetypeKey, ArchetypeRegistry, ArchetypeSignature,
     Error as RegistryError,
@@ -48,7 +48,7 @@ impl Archetype {
     pub fn get_column_row(&self, column: usize, row: usize) -> &[u8] {
         let (chunk_index, row_in_chunk) = self.locate_row(row);
         let chunk = &self.chunks[chunk_index];
-        let stride = chunk.meta.columns()[column].stride;
+        let stride = chunk.meta.column_size(column);
         let start = row_in_chunk * stride;
         let end = start + stride;
         &chunk.get_column(column)[start..end]
@@ -63,7 +63,7 @@ impl Archetype {
     pub fn get_column_row_mut(&mut self, column: usize, row: usize) -> &mut [u8] {
         let (chunk_index, row_in_chunk) = self.locate_row(row);
         let chunk = &mut self.chunks[chunk_index];
-        let stride = chunk.meta.columns()[column].stride;
+        let stride = chunk.meta.column_size(column);
         let start = row_in_chunk * stride;
         let end = start + stride;
         &mut chunk.get_column_mut(column)[start..end]
@@ -213,7 +213,11 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::entity::{EntityGeneration, EntityIndex};
-    use crate::prelude::*;
+    use crate::macros::Component;
+    use crate::prelude::{ComponentKey, ComponentRegistry};
+    use starforge_reflect::basic::meta::NeedsDrop;
+    use starforge_reflect::prelude::{TypeId, TypeMeta, TypeName};
+    use std::alloc::Layout;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -246,69 +250,66 @@ mod tests {
         }
     }
 
-    /// Script columns registered by [`TestContext::mock`], in registration order.
-    fn columns() -> [TypeMeta; 2] {
-        [
-            TypeMeta::new(TypeId::of_script(1), 8, 8, TypeName::of_script("column_0")),
-            TypeMeta::new(TypeId::of_script(2), 4, 4, TypeName::of_script("column_1")),
-        ]
-    }
+    /// Script column (id, size, align) triples registered by [`TestContext::mock`], in
+    /// registration order.
+    const COLUMNS: [(TypeId, usize, usize); 2] =
+        [(TypeId::of_script(1), 8, 8), (TypeId::of_script(2), 4, 4)];
 
-    /// Owns the registries backing the columns under test, so keys derived from them stay
+    /// Owns the registry backing the columns under test, so keys derived from it stay
     /// resolvable for the lifetime of the context.
     struct TestContext {
-        type_reg: TypeRegistry,
         comp_reg: ComponentRegistry,
     }
 
     impl TestContext {
         /// Builds a context holding the [`COLUMNS`] registrations, in registration order.
         pub fn mock() -> Self {
-            let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
-
-            for column in columns() {
-                type_reg.register(column.clone());
-                comp_reg.register(ComponentMeta::new(column.id, ComponentKind::Trivial));
+            for (id, size, align) in COLUMNS {
+                comp_reg.register(TypeMeta::new_impl(
+                    id,
+                    TypeName::of_script("test"),
+                    NeedsDrop::Trivial,
+                    Layout::from_size_align(size, align).unwrap(),
+                ));
             }
-
-            Self { type_reg, comp_reg }
+            Self { comp_reg }
         }
 
         /// Builds a context holding a single wide (8000-byte) column, whose maximum
         /// buffer size holds only two entities.
         pub fn mock_wide() -> Self {
-            let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
             let id = TypeId::of_script(1);
-            type_reg.register(TypeMeta::new(id, 8000, 8, TypeName::of_script("wide")));
-            comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
-            Self { type_reg, comp_reg }
+            comp_reg.register(TypeMeta::new_impl(
+                id,
+                TypeName::of_script("wide"),
+                NeedsDrop::Trivial,
+                Layout::from_size_align(8000, 8).unwrap(),
+            ));
+            Self { comp_reg }
         }
 
         /// Builds a context holding only the non-trivial `Tracked` component.
         pub fn mock_tracked() -> Self {
-            let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
-            type_reg.register(TypeMeta::of::<Tracked>());
-            comp_reg.register(ComponentMeta::of::<Tracked>());
-            Self { type_reg, comp_reg }
+            comp_reg.register(TypeMeta::new::<Tracked>());
+            Self { comp_reg }
         }
 
-        pub fn column(&self, id: TypeId) -> ColumnEntry {
-            let type_key = *self.type_reg.id_to_key(&id).unwrap();
-            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
+        pub fn column(&self, id: TypeId) -> ComponentKey {
+            *self.comp_reg.id_to_key(&id).unwrap()
         }
 
         /// Builds an `ArchetypeMeta` over [`COLUMNS`], in registration order.
         pub fn meta(&self) -> ArchetypeMeta {
-            ArchetypeMeta::new(columns().iter().map(|c| self.column(c.id)).collect())
+            self.meta_with(&COLUMNS.map(|(id, _, _)| id))
         }
 
         /// Builds an `ArchetypeMeta` over the given ids, in the given order.
         pub fn meta_with(&self, ids: &[TypeId]) -> ArchetypeMeta {
-            ArchetypeMeta::new(ids.iter().map(|id| self.column(*id)).collect())
+            let keys: Vec<ComponentKey> = ids.iter().map(|id| self.column(*id)).collect();
+            ArchetypeMeta::new(&keys, &self.comp_reg).unwrap()
         }
     }
 
@@ -328,7 +329,7 @@ mod tests {
         assert_eq!(archetype.chunks.len(), 1);
         assert_eq!(archetype.chunks[0].layout.capacity(), 1);
 
-        // The chunked accessors cover exactly the live rows, so publish `set_len(1)`
+        // The chunked accessor cover exactly the live rows, so publish `set_len(1)`
         // before writing through them. Both columns are trivial, so a byte copy into
         // each component-sized slot is safe.
         unsafe {

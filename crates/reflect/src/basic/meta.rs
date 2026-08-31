@@ -92,4 +92,26 @@ mod tests {
         let meta = TypeMeta::new::<String>();
         assert!(matches!(meta.needs_drop(), NeedsDrop::NonTrivial { .. }));
     }
+
+    #[test]
+    fn equality_ignores_derived_attributes() {
+        let type_id = TypeId::of_script(1);
+        let a = TypeMeta::new_impl(
+            type_id,
+            TypeName::of_script("v1"),
+            NeedsDrop::Trivial,
+            Layout::new::<u8>(),
+        );
+        let b = TypeMeta::new_impl(
+            type_id,
+            TypeName::of_script("v2"),
+            NeedsDrop::NonTrivial {
+                drop_fn: |ptr| unsafe { std::ptr::drop_in_place(ptr as *mut String) },
+            },
+            Layout::new::<String>(),
+        );
+
+        // identity is defined by `id` alone; name/drop/layout are derived attributes of it
+        assert_eq!(a, b);
+    }
 }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::{Archetype, ArchetypeMeta, Error as ArchetypeError};
 use crate::tool::BitSignature;
 use nonmax::NonMaxU32;
+use starforge_macro::Deref;
 use thiserror::Error;
 
 /// Bitmask identifying the component set of an archetype, supposed to be built from
@@ -33,12 +34,12 @@ pub struct ArchetypeKey {
 
 /// Non-`u32::MAX` slot index for entries inside an [`ArchetypeRegistry`].
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct ArchetypeIndex(NonMaxU32);
 
 /// Non-`u32::MAX` generation token attached to an [`ArchetypeKey`].
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct ArchetypeGeneration(NonMaxU32);
 
 impl ArchetypeIndex {
@@ -52,27 +53,12 @@ impl ArchetypeIndex {
         let value = u32::try_from(value).ok()?;
         Self::new(value)
     }
-
-    /// Returns the raw `u32` value.
-    pub fn get(self) -> u32 {
-        self.0.get()
-    }
-
-    /// Returns this index as a `usize` for indexing vectors.
-    pub fn as_usize(self) -> usize {
-        self.get() as usize
-    }
 }
 
 impl ArchetypeGeneration {
     /// Creates a generation from a raw `u32`, rejecting `u32::MAX`.
     pub fn new(value: u32) -> Option<Self> {
         NonMaxU32::new(value).map(Self)
-    }
-
-    /// Returns the raw `u32` value.
-    pub fn get(self) -> u32 {
-        self.0.get()
     }
 
     /// Advances to the next generation, wrapping from `u32::MAX - 1` to `0`.
@@ -104,7 +90,8 @@ impl ArchetypeRegistry {
         let archetype = Archetype::new(meta)?;
 
         let key = if let Some(retired_key) = self.retired_keys.pop() {
-            self.archetype_entries[retired_key.index.as_usize()] = Some((retired_key, archetype));
+            self.archetype_entries[retired_key.index.get() as usize] =
+                Some((retired_key, archetype));
             retired_key
         } else {
             let key = ArchetypeKey {
@@ -131,7 +118,7 @@ impl ArchetypeRegistry {
 
         // `key_to_archetype` above guarantees this slot is live; replacing the entry with
         // `None` drops the archetype together with the key.
-        self.archetype_entries[key.index.as_usize()] = None;
+        self.archetype_entries[key.index.get() as usize] = None;
         self.retired_keys
             .push(ArchetypeKey { index: key.index, generation: key.generation.next() });
 
@@ -179,13 +166,12 @@ impl ArchetypeRegistry {
     }
 
     fn key_to_index(&self, key: &ArchetypeKey) -> Result<usize, Error> {
-        let entry =
-            self.archetype_entries
-                .get(key.index.as_usize())
-                .ok_or(Error::IndexOutOfBounds {
-                    index: key.index.get(),
-                    bounds: self.archetype_entries.len(),
-                })?;
+        let entry = self.archetype_entries.get(key.index.get() as usize).ok_or(
+            Error::IndexOutOfBounds {
+                index: key.index.get(),
+                bounds: self.archetype_entries.len(),
+            },
+        )?;
         if let Some((stored_key, _)) = entry {
             if stored_key.generation != key.generation {
                 return Err(Error::GenerationMismatch {
@@ -193,7 +179,7 @@ impl ArchetypeRegistry {
                     actual: key.generation.get(),
                 });
             }
-            return Ok(key.index.as_usize());
+            return Ok(key.index.get() as usize);
         }
 
         let expected = self
@@ -225,8 +211,10 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::archetype::{ArchetypeMeta, ColumnEntry};
-    use crate::prelude::*;
+    use crate::prelude::{ComponentKey, ComponentRegistry};
+    use starforge_reflect::basic::meta::NeedsDrop;
+    use starforge_reflect::prelude::{TypeId, TypeMeta, TypeName};
+    use std::alloc::Layout;
     use std::mem::size_of;
     use std::sync::Arc;
 
@@ -235,38 +223,39 @@ mod tests {
         assert_eq!(size_of::<ArchetypeKey>(), size_of::<Option<ArchetypeKey>>());
     }
 
-    /// Owns the registries backing the columns under test, so keys derived from them stay
+    /// Owns the registry backing the columns under test, so keys derived from it stay
     /// resolvable for the lifetime of the context.
     struct TestContext {
-        type_reg: TypeRegistry,
         comp_reg: ComponentRegistry,
     }
 
     impl TestContext {
         /// Builds a context holding three script columns, in registration order.
         pub fn mock() -> Self {
-            let mut type_reg = TypeRegistry::default();
             let mut comp_reg = ComponentRegistry::default();
             for id in [
                 TypeId::of_script(1),
                 TypeId::of_script(2),
                 TypeId::of_script(3),
             ] {
-                type_reg.register(TypeMeta::new(id, 8, 8, TypeName::of_script("test")));
-                comp_reg.register(ComponentMeta::new(id, ComponentKind::Trivial));
+                comp_reg.register(TypeMeta::new_impl(
+                    id,
+                    TypeName::of_script("test"),
+                    NeedsDrop::Trivial,
+                    Layout::from_size_align(8, 8).unwrap(),
+                ));
             }
-            Self { type_reg, comp_reg }
+            Self { comp_reg }
         }
 
-        pub fn column(&self, id: TypeId) -> ColumnEntry {
-            let type_key = *self.type_reg.id_to_key(&id).unwrap();
-            let comp_key = *self.comp_reg.id_to_key(&id).unwrap();
-            ColumnEntry::new(type_key, comp_key, &self.type_reg, &self.comp_reg).unwrap()
+        pub fn column(&self, id: TypeId) -> ComponentKey {
+            *self.comp_reg.id_to_key(&id).unwrap()
         }
 
         /// Builds an `Arc<ArchetypeMeta>` over the given ids, in the given order.
         pub fn meta(&self, ids: &[TypeId]) -> Arc<ArchetypeMeta> {
-            Arc::new(ArchetypeMeta::new(ids.iter().map(|id| self.column(*id)).collect()))
+            let keys: Vec<ComponentKey> = ids.iter().map(|id| self.column(*id)).collect();
+            Arc::new(ArchetypeMeta::new(&keys, &self.comp_reg).unwrap())
         }
     }
 
@@ -355,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn mutable_lookups_resolve_registered_archetype() {
+    fn mutable_lookup_resolve_registered_archetype() {
         let ctx = TestContext::mock();
         let mut registry = ArchetypeRegistry::default();
         let meta = ctx.meta(&[TypeId::of_script(1)]);

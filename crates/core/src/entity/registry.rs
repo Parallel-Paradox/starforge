@@ -1,4 +1,5 @@
 use nonmax::NonMaxU32;
+use starforge_macro::Deref;
 
 pub struct EntityRegistry {
     // arche_reg: ArchetypeRegistry,
@@ -16,12 +17,12 @@ pub struct EntityKey {
 
 /// Non-`u32::MAX` slot index for entities.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct EntityIndex(NonMaxU32);
 
 /// Non-`u32::MAX` generation token attached to an [`EntityKey`].
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct EntityGeneration(NonMaxU32);
 
 impl EntityIndex {
@@ -35,27 +36,12 @@ impl EntityIndex {
         let value = u32::try_from(value).ok()?;
         Self::new(value)
     }
-
-    /// Returns the raw `u32` value.
-    pub fn get(self) -> u32 {
-        self.0.get()
-    }
-
-    /// Returns this index as a `usize` for indexing vectors.
-    pub fn as_usize(self) -> usize {
-        self.get() as usize
-    }
 }
 
 impl EntityGeneration {
     /// Creates a generation from a raw `u32`, rejecting `u32::MAX`.
     pub fn new(value: u32) -> Option<Self> {
         NonMaxU32::new(value).map(Self)
-    }
-
-    /// Returns the raw `u32` value.
-    pub fn get(self) -> u32 {
-        self.0.get()
     }
 
     /// Advances to the next generation, wrapping from `u32::MAX - 1` to `0`.

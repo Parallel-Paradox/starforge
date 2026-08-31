@@ -3,15 +3,10 @@ pub mod entity;
 pub mod macros;
 pub mod system;
 pub mod tool;
-pub mod types;
 
 pub mod prelude {
-    pub use crate::component::{
-        Component, ComponentKey, ComponentKind, ComponentMeta, ComponentRegistry,
-    };
+    pub use crate::component::{Component, ComponentKey, ComponentRegistry};
     pub use crate::entity::{Entity, EntityKey, EntityRegistry};
-    pub use crate::macros::Component;
-    pub use crate::types::{TypeId, TypeKey, TypeMeta, TypeName, TypeRegistry};
 }
 
 pub struct Core {}
