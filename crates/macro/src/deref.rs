@@ -3,7 +3,8 @@ use quote::quote;
 use starforge_macro_util::attr::find_unique_target_attr;
 use syn::{self, Data, DeriveInput, Index, Member, Type};
 
-use crate::DEREF_TARGET_ATTR;
+/// Helper attribute: `#[deref]` on the target field.
+const DEREF_TARGET_ATTR: &str = "deref";
 
 pub fn impl_deref_macro(ast: &DeriveInput) -> TokenStream {
     let ident = &ast.ident;
@@ -76,14 +77,9 @@ fn get_target_field(ast: &DeriveInput) -> syn::Result<(&Type, Member)> {
                 .unwrap_or_else(|| Member::Unnamed(Index::from(0)));
             Ok((&field.ty, member))
         }
-        _ => {
-            let err = match find_unique_target_attr(s, DEREF_TARGET_ATTR) {
-                Ok(result) => {
-                    return Ok(result);
-                }
-                Err(err) => err,
-            };
-            Err(syn::Error::new(Span::call_site().into(), err))
-        }
+        _ => match find_unique_target_attr(s, DEREF_TARGET_ATTR) {
+            Ok(result) => Ok(result),
+            Err(err) => Err(err.into()),
+        },
     }
 }
