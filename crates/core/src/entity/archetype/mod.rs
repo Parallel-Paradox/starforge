@@ -34,6 +34,11 @@ impl Archetype {
         self.entity_keys.len()
     }
 
+    /// Returns `true` if the archetype holds no live entities.
+    pub fn is_empty(&self) -> bool {
+        self.entity_keys.is_empty()
+    }
+
     /// Returns all live entity keys in row order.
     pub fn get_entity_keys(&self) -> &[EntityKey] {
         &self.entity_keys

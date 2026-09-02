@@ -84,11 +84,8 @@ impl ArchetypeChunkLayout {
         let buffer_align = Self::buffer_align_for(meta);
         let aligned_size = buffer_size - buffer_size % buffer_align;
         let per_entity = (0..meta.columns().len()).map(|i| meta.column_size(i)).sum::<usize>();
-        let capacity = if per_entity == 0 {
-            usize::MAX
-        } else {
-            aligned_size / per_entity
-        };
+        // A zero per-entity size means there are no columns: capacity is unbounded.
+        let capacity = aligned_size.checked_div(per_entity).unwrap_or(usize::MAX);
 
         // Columns are tightly packed at the head; slack (if any) remains at the tail.
         let mut columns_size = 0;

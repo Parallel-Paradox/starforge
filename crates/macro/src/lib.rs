@@ -6,7 +6,7 @@ use proc_macro::TokenStream;
 
 mod deref;
 
-const DEREF_TARGET_ATTR: &'static str = "deref";
+const DEREF_TARGET_ATTR: &str = "deref";
 
 #[proc_macro_derive(Deref, attributes(deref))]
 pub fn derive_deref(input: TokenStream) -> TokenStream {

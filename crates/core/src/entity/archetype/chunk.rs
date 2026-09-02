@@ -84,6 +84,11 @@ impl ArchetypeChunk {
         self.len
     }
 
+    /// Returns `true` if the chunk holds no valid entities.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Sets the number of valid entities in this chunk.
     ///
     /// # Safety

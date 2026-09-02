@@ -81,6 +81,11 @@ impl SparseSet {
         self.entity_keys.len()
     }
 
+    /// Returns `true` if the dense array currently stores no entities.
+    pub fn is_empty(&self) -> bool {
+        self.entity_keys.is_empty()
+    }
+
     /// Builds an empty `SparseSet` for `meta`'s component type, without allocating a
     /// dense buffer.
     pub fn new(meta: TypeMeta) -> Self {
@@ -415,8 +420,10 @@ mod tests {
 
         let values: Vec<u32> = set
             .get_component()
-            .chunks_exact(4)
-            .map(|c| u32::from_ne_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_ne_bytes(*c))
             .collect();
 
         assert_eq!(values, vec![11, 22]);

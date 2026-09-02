@@ -114,7 +114,7 @@ impl Parcel {
             return None;
         }
 
-        let parcel = std::mem::replace(self, Self::default());
+        let parcel = std::mem::take(self);
         // SAFETY: the type check above guarantees `T` matches the parcel.
         Some(unsafe { parcel.take::<T>() })
     }

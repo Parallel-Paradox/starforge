@@ -6,10 +6,9 @@ pub fn find_unique_target_attr<'a>(
     target: &'static str,
 ) -> Result<(&'a Type, Member), UniqueAttrError> {
     let mut index = 0;
-    let mut field_iter = struct_data.fields.iter();
     let mut result: Option<(&Type, Member)> = None;
 
-    while let Some(field) = field_iter.next() {
+    for field in &struct_data.fields {
         let attrs = &field.attrs;
         for attr in attrs {
             if !attr.path().is_ident(target) {

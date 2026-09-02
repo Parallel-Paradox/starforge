@@ -40,15 +40,15 @@ impl Manifest {
         if name == package_name {
             return parse_str_to_path("crate");
         }
-        if let Some(deps) = self.0.get("dependencies") {
-            if deps.get(name).is_some() {
-                return parse_str_to_path(name);
-            }
+        if let Some(deps) = self.0.get("dependencies")
+            && deps.get(name).is_some()
+        {
+            return parse_str_to_path(name);
         }
-        if let Some(deps) = self.0.get("dev-dependencies") {
-            if deps.get(name).is_some() {
-                return parse_str_to_path(name);
-            }
+        if let Some(deps) = self.0.get("dev-dependencies")
+            && deps.get(name).is_some()
+        {
+            return parse_str_to_path(name);
         }
         None
     }
