@@ -50,7 +50,7 @@ impl TypeMeta {
         self.layout
     }
 
-    /// Creates a new `TypeMeta` instance for the given type `T`.
+    /// Creates a new [`TypeMeta`] instance for the given type `T`.
     pub fn new<T: Any>() -> Self {
         let id = TypeId::of::<T>();
         let name = TypeName::of::<T>();
@@ -66,7 +66,7 @@ impl TypeMeta {
         Self { id, name, needs_drop, layout }
     }
 
-    /// Creates a new `TypeMeta` instance with the provided parameters.
+    /// Creates a new [`TypeMeta`] instance with the provided parameters.
     /// Useful for creating metadata that may not be known at compile time such as scripting.
     pub fn new_impl(id: TypeId, name: TypeName, needs_drop: NeedsDrop, layout: Layout) -> Self {
         Self { id, name, needs_drop, layout }

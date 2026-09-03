@@ -217,6 +217,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::{ComponentMeta, ComponentStorage};
     use crate::entity::{EntityGeneration, EntityIndex};
     use crate::macros::Component;
     use crate::prelude::{ComponentKey, ComponentRegistry};
@@ -271,11 +272,14 @@ mod tests {
         pub fn mock() -> Self {
             let mut comp_reg = ComponentRegistry::default();
             for (id, size, align) in COLUMNS {
-                comp_reg.register(TypeMeta::new_impl(
-                    id,
-                    TypeName::of_script("test"),
-                    NeedsDrop::Trivial,
-                    Layout::from_size_align(size, align).unwrap(),
+                comp_reg.register(ComponentMeta::new_impl(
+                    TypeMeta::new_impl(
+                        id,
+                        TypeName::of_script("test"),
+                        NeedsDrop::Trivial,
+                        Layout::from_size_align(size, align).unwrap(),
+                    ),
+                    ComponentStorage::Archetype,
                 ));
             }
             Self { comp_reg }
@@ -286,11 +290,14 @@ mod tests {
         pub fn mock_wide() -> Self {
             let mut comp_reg = ComponentRegistry::default();
             let id = TypeId::of_script(1);
-            comp_reg.register(TypeMeta::new_impl(
-                id,
-                TypeName::of_script("wide"),
-                NeedsDrop::Trivial,
-                Layout::from_size_align(8000, 8).unwrap(),
+            comp_reg.register(ComponentMeta::new_impl(
+                TypeMeta::new_impl(
+                    id,
+                    TypeName::of_script("wide"),
+                    NeedsDrop::Trivial,
+                    Layout::from_size_align(8000, 8).unwrap(),
+                ),
+                ComponentStorage::Archetype,
             ));
             Self { comp_reg }
         }
@@ -298,7 +305,7 @@ mod tests {
         /// Builds a context holding only the non-trivial `Tracked` component.
         pub fn mock_tracked() -> Self {
             let mut comp_reg = ComponentRegistry::default();
-            comp_reg.register(TypeMeta::new::<Tracked>());
+            comp_reg.register(ComponentMeta::new::<Tracked>());
             Self { comp_reg }
         }
 

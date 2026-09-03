@@ -1,6 +1,6 @@
 use super::ArchetypeSignature;
 use crate::{
-    component::{ComponentRegistry, Error},
+    component::{ComponentRegistry, ComponentStorage, Error},
     prelude::ComponentKey,
 };
 
@@ -52,7 +52,13 @@ impl ArchetypeMeta {
         let mut columns: Vec<ColumnEntry> = Vec::with_capacity(unsorted_columns.len());
         for key in unsorted_columns {
             let meta = comp_reg.key_to_meta(key)?;
-            columns.push((*key, meta.clone()));
+            debug_assert_eq!(
+                *meta.storage(),
+                ComponentStorage::Archetype,
+                "archetype column for component {:?} is not archetype-stored",
+                meta.name(),
+            );
+            columns.push((*key, TypeMeta::clone(meta)));
         }
         columns.sort_by(cmp_columns);
 
@@ -107,6 +113,7 @@ impl ArchetypeMeta {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::{ComponentMeta, ComponentStorage};
     use starforge_reflect::basic::meta::NeedsDrop;
     use starforge_reflect::prelude::TypeName;
     use std::alloc::Layout;
@@ -131,11 +138,14 @@ mod tests {
                 (TypeId::of_script(7), 4, 4),
             ];
             for (id, size, align) in types {
-                comp_reg.register(TypeMeta::new_impl(
-                    id,
-                    TypeName::of_script("test"),
-                    NeedsDrop::Trivial,
-                    Layout::from_size_align(size, align).unwrap(),
+                comp_reg.register(ComponentMeta::new_impl(
+                    TypeMeta::new_impl(
+                        id,
+                        TypeName::of_script("test"),
+                        NeedsDrop::Trivial,
+                        Layout::from_size_align(size, align).unwrap(),
+                    ),
+                    ComponentStorage::Archetype,
                 ));
             }
 
@@ -261,6 +271,27 @@ mod tests {
         let result = ArchetypeMeta::new(&[column], &ctx.comp_reg);
 
         assert!(matches!(result, Err(Error::GenerationMismatch { .. })));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn archetype_columns_must_be_archetype_stored() {
+        let mut comp_reg = ComponentRegistry::default();
+        comp_reg.register(ComponentMeta::new_impl(
+            TypeMeta::new_impl(
+                TypeId::of_script(1),
+                TypeName::of_script("sparse"),
+                NeedsDrop::Trivial,
+                Layout::new::<u8>(),
+            ),
+            ComponentStorage::SparseSet,
+        ));
+        let key = *comp_reg.id_to_key(&TypeId::of_script(1)).unwrap();
+
+        // A sparse-set component must never become an archetype column; the debug_assert
+        // in `ArchetypeMeta::new` catches it.
+        let result = std::panic::catch_unwind(|| ArchetypeMeta::new(&[key], &comp_reg));
+        assert!(result.is_err());
     }
 
     #[test]

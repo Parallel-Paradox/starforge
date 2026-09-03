@@ -1,16 +1,25 @@
 use nonmax::NonMaxU32;
-use starforge_macro::Deref;
+use starforge_macro::{Deref, DerefMut};
 use starforge_reflect::prelude::{TypeId, TypeMeta};
 use std::collections::HashMap;
 use thiserror::Error;
 
-/// Maps [`TypeId`]s to stable [`ComponentKey`]s and their [`TypeMeta`], with generation-based
-/// invalidation of keys.
+use crate::component::{Component, ComponentStorage};
+
+#[derive(Clone, Debug, PartialEq, Eq, Deref, DerefMut)]
+pub struct ComponentMeta {
+    #[deref]
+    type_meta: TypeMeta,
+    storage: ComponentStorage,
+}
+
+/// Maps [`TypeId`]s to stable [`ComponentKey`]s and their [`ComponentMeta`], with
+/// generation-based invalidation of keys.
 #[derive(Default)]
 pub struct ComponentRegistry {
     id_to_key: HashMap<TypeId, ComponentKey>,
     /// Slot table: `Some((key, meta))` means live, `None` means retired/vacant waiting for reuse.
-    meta_entries: Vec<Option<(ComponentKey, TypeMeta)>>,
+    meta_entries: Vec<Option<(ComponentKey, ComponentMeta)>>,
     retired_keys: Vec<ComponentKey>,
 }
 
@@ -32,6 +41,24 @@ pub struct ComponentIndex(NonMaxU32);
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct ComponentGeneration(NonMaxU32);
+
+impl ComponentMeta {
+    /// The storage strategy in entity registry for this component type.
+    pub fn storage(&self) -> &ComponentStorage {
+        &self.storage
+    }
+
+    /// Creates a new [`ComponentMeta`] for the given component type `T`.
+    pub fn new<T: Component>() -> Self {
+        Self { type_meta: TypeMeta::new::<T>(), storage: T::storage() }
+    }
+
+    /// Creates a new [`ComponentMeta`] instance with the provided parameters.
+    /// Useful for creating metadata that may not be known at compile time such as scripting.
+    pub fn new_impl(type_meta: TypeMeta, storage: ComponentStorage) -> Self {
+        Self { type_meta, storage }
+    }
+}
 
 impl ComponentIndex {
     /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
@@ -68,7 +95,7 @@ impl ComponentGeneration {
 impl ComponentRegistry {
     /// Registers `meta`, returning a stable `ComponentKey`. Re-registering the same `TypeId`
     /// returns the existing key.
-    pub fn register(&mut self, meta: TypeMeta) -> ComponentKey {
+    pub fn register(&mut self, meta: ComponentMeta) -> ComponentKey {
         let type_id = meta.id();
         if let Some(&existing_key) = self.id_to_key.get(&type_id) {
             return existing_key;
@@ -122,14 +149,14 @@ impl ComponentRegistry {
         self.id_to_key.get(type_id).ok_or(Error::UnknownType { type_id: *type_id })
     }
 
-    /// Looks up the `TypeMeta` registered for `type_id`.
-    pub fn id_to_meta(&self, type_id: &TypeId) -> Result<&TypeMeta, Error> {
+    /// Looks up the [`ComponentMeta`] registered for `type_id`.
+    pub fn id_to_meta(&self, type_id: &TypeId) -> Result<&ComponentMeta, Error> {
         let key = self.id_to_key(type_id)?;
         self.key_to_meta(key)
     }
 
-    /// Resolves `key` to its `TypeMeta`, validating that its generation is still current.
-    pub fn key_to_meta(&self, key: &ComponentKey) -> Result<&TypeMeta, Error> {
+    /// Resolves `key` to its [`ComponentMeta`], validating that its generation is still current.
+    pub fn key_to_meta(&self, key: &ComponentKey) -> Result<&ComponentMeta, Error> {
         let entry =
             self.meta_entries.get(key.index.get() as usize).ok_or(Error::IndexOutOfBounds {
                 index: key.index.get(),
@@ -184,6 +211,10 @@ mod tests {
     struct Trivial;
 
     #[derive(Component)]
+    #[component(storage = SparseSet)]
+    struct Sparse;
+
+    #[derive(Component)]
     struct NonTrivial(#[allow(dead_code)] Box<u8>);
 
     unsafe fn drop_erased_string(ptr: *mut u8) {
@@ -198,40 +229,64 @@ mod tests {
     #[test]
     fn register_is_idempotent_for_same_type() {
         let mut registry = ComponentRegistry::default();
-        let key1 = registry.register(TypeMeta::new::<Trivial>());
-        let key2 = registry.register(TypeMeta::new::<Trivial>());
+        let key1 = registry.register(ComponentMeta::new::<Trivial>());
+        let key2 = registry.register(ComponentMeta::new::<Trivial>());
 
         assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn register_preserves_storage_strategy() {
+        let mut registry = ComponentRegistry::default();
+        registry.register(ComponentMeta::new::<Sparse>());
+        registry.register(ComponentMeta::new::<Trivial>());
+
+        assert_eq!(
+            *registry.id_to_meta(&TypeId::of::<Sparse>()).unwrap().storage(),
+            ComponentStorage::SparseSet
+        );
+        // Components without `#[component(storage = ...)]` default to `Archetype`.
+        assert_eq!(
+            *registry.id_to_meta(&TypeId::of::<Trivial>()).unwrap().storage(),
+            ComponentStorage::Archetype
+        );
     }
 
     #[test]
     fn register_keeps_existing_metadata_on_reregister() {
         let mut registry = ComponentRegistry::default();
         let type_id = TypeId::of_script(2);
-        registry.register(TypeMeta::new_impl(
-            type_id,
-            TypeName::of_script("v1"),
-            NeedsDrop::Trivial,
-            Layout::new::<u8>(),
+        registry.register(ComponentMeta::new_impl(
+            TypeMeta::new_impl(
+                type_id,
+                TypeName::of_script("v1"),
+                NeedsDrop::Trivial,
+                Layout::new::<u8>(),
+            ),
+            ComponentStorage::Archetype,
         ));
-        registry.register(TypeMeta::new_impl(
-            type_id,
-            TypeName::of_script("v2"),
-            NeedsDrop::NonTrivial { drop_fn: drop_erased_string },
-            Layout::new::<String>(),
+        registry.register(ComponentMeta::new_impl(
+            TypeMeta::new_impl(
+                type_id,
+                TypeName::of_script("v2"),
+                NeedsDrop::NonTrivial { drop_fn: drop_erased_string },
+                Layout::new::<String>(),
+            ),
+            ComponentStorage::Archetype,
         ));
 
-        // re-registering doesn't overwrite metadata
+        // Re-registering doesn't overwrite metadata.
         let meta = registry.id_to_meta(&type_id).unwrap();
         assert_eq!(meta.name(), &TypeName::of_script("v1"));
         assert!(matches!(meta.needs_drop(), NeedsDrop::Trivial));
+        assert_eq!(*meta.storage(), ComponentStorage::Archetype);
     }
 
     #[test]
     fn unregister_invalidates_the_key() {
         let mut registry = ComponentRegistry::default();
         let type_id = TypeId::of::<Trivial>();
-        let key = registry.register(TypeMeta::new::<Trivial>());
+        let key = registry.register(ComponentMeta::new::<Trivial>());
 
         registry.unregister(key).unwrap();
 
@@ -249,10 +304,10 @@ mod tests {
     #[test]
     fn register_reuses_retired_slot_with_bumped_generation() {
         let mut registry = ComponentRegistry::default();
-        let key_a = registry.register(TypeMeta::new::<Trivial>());
+        let key_a = registry.register(ComponentMeta::new::<Trivial>());
         registry.unregister(key_a).unwrap();
 
-        let key_b = registry.register(TypeMeta::new::<NonTrivial>());
+        let key_b = registry.register(ComponentMeta::new::<NonTrivial>());
 
         assert_eq!(key_b.index, key_a.index);
         assert_eq!(key_b.generation, key_a.generation.next());
@@ -275,7 +330,7 @@ mod tests {
     #[test]
     fn key_to_meta_out_of_bounds_index_is_rejected() {
         let mut registry = ComponentRegistry::default();
-        let key = registry.register(TypeMeta::new::<Trivial>());
+        let key = registry.register(ComponentMeta::new::<Trivial>());
         let bogus =
             ComponentKey { index: ComponentIndex::new(key.index.get() + 1).unwrap(), ..key };
 

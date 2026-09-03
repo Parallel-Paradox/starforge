@@ -115,7 +115,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::ComponentRegistry;
+    use crate::component::{ComponentMeta, ComponentRegistry, ComponentStorage};
     use crate::prelude::ComponentKey;
     use starforge_reflect::basic::meta::NeedsDrop;
     use starforge_reflect::prelude::{TypeId, TypeMeta, TypeName};
@@ -137,11 +137,14 @@ mod tests {
         pub fn mock() -> Self {
             let mut comp_reg = ComponentRegistry::default();
             for (id, size, align) in COLUMNS {
-                comp_reg.register(TypeMeta::new_impl(
-                    id,
-                    TypeName::of_script("test"),
-                    NeedsDrop::Trivial,
-                    Layout::from_size_align(size, align).unwrap(),
+                comp_reg.register(ComponentMeta::new_impl(
+                    TypeMeta::new_impl(
+                        id,
+                        TypeName::of_script("test"),
+                        NeedsDrop::Trivial,
+                        Layout::from_size_align(size, align).unwrap(),
+                    ),
+                    ComponentStorage::Archetype,
                 ));
             }
             Self { comp_reg }

@@ -258,6 +258,7 @@ impl ArchetypeChunk {
 mod tests {
     use super::*;
 
+    use crate::component::{ComponentMeta, ComponentStorage};
     use crate::macros::Component;
     use crate::prelude::{ComponentKey, ComponentRegistry};
     use starforge_reflect::basic::meta::NeedsDrop;
@@ -315,11 +316,14 @@ mod tests {
         pub fn mock() -> Self {
             let mut comp_reg = ComponentRegistry::default();
             for (id, size, align) in COLUMNS {
-                comp_reg.register(TypeMeta::new_impl(
-                    id,
-                    TypeName::of_script("test"),
-                    NeedsDrop::Trivial,
-                    Layout::from_size_align(size, align).unwrap(),
+                comp_reg.register(ComponentMeta::new_impl(
+                    TypeMeta::new_impl(
+                        id,
+                        TypeName::of_script("test"),
+                        NeedsDrop::Trivial,
+                        Layout::from_size_align(size, align).unwrap(),
+                    ),
+                    ComponentStorage::Archetype,
                 ));
             }
             Self { comp_reg }
@@ -329,12 +333,15 @@ mod tests {
         /// 8-align) and a trivial u64-sized script column (8 bytes, 8-align).
         pub fn mock_tracked() -> Self {
             let mut comp_reg = ComponentRegistry::default();
-            comp_reg.register(TypeMeta::new::<Tracked>());
-            comp_reg.register(TypeMeta::new_impl(
-                TypeId::of_script(1),
-                TypeName::of_script("trivial"),
-                NeedsDrop::Trivial,
-                Layout::from_size_align(8, 8).unwrap(),
+            comp_reg.register(ComponentMeta::new::<Tracked>());
+            comp_reg.register(ComponentMeta::new_impl(
+                TypeMeta::new_impl(
+                    TypeId::of_script(1),
+                    TypeName::of_script("trivial"),
+                    NeedsDrop::Trivial,
+                    Layout::from_size_align(8, 8).unwrap(),
+                ),
+                ComponentStorage::Archetype,
             ));
             Self { comp_reg }
         }

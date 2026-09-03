@@ -213,6 +213,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::{ComponentMeta, ComponentStorage};
     use crate::prelude::{ComponentKey, ComponentRegistry};
     use starforge_reflect::basic::meta::NeedsDrop;
     use starforge_reflect::prelude::{TypeId, TypeMeta, TypeName};
@@ -240,11 +241,14 @@ mod tests {
                 TypeId::of_script(2),
                 TypeId::of_script(3),
             ] {
-                comp_reg.register(TypeMeta::new_impl(
-                    id,
-                    TypeName::of_script("test"),
-                    NeedsDrop::Trivial,
-                    Layout::from_size_align(8, 8).unwrap(),
+                comp_reg.register(ComponentMeta::new_impl(
+                    TypeMeta::new_impl(
+                        id,
+                        TypeName::of_script("test"),
+                        NeedsDrop::Trivial,
+                        Layout::from_size_align(8, 8).unwrap(),
+                    ),
+                    ComponentStorage::Archetype,
                 ));
             }
             Self { comp_reg }
