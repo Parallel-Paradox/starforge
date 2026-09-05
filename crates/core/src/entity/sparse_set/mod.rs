@@ -245,7 +245,7 @@ impl SparseSet {
 
     /// Returns the bytes of the dense component array covering the valid entities: the
     /// first `len` elements.
-    pub fn get_component(&self) -> &[u8] {
+    pub fn get_components(&self) -> &[u8] {
         let size = self.meta.layout().size();
         // SAFETY: `buf_ptr` is a `capacity`-element allocation of `size`-byte
         // elements; `len <= capacity` keeps the `len * size`-byte slice within it.
@@ -254,7 +254,7 @@ impl SparseSet {
 
     /// Returns the bytes of the dense component array covering the valid entities as a
     /// mutable slice: the first `len` elements.
-    pub fn get_component_mut(&mut self) -> &mut [u8] {
+    pub fn get_components_mut(&mut self) -> &mut [u8] {
         let len = self.len() * self.meta.layout().size();
         // SAFETY: `buf_ptr` is a `capacity`-element allocation of `size`-byte
         // elements; `len <= capacity` keeps the `len * size`-byte slice within it.
@@ -264,14 +264,14 @@ impl SparseSet {
     /// Returns an iterator over the dense array's valid entities, one component-sized
     /// byte slice per entity.
     pub fn get_component_chunks(&self) -> ChunksExact<'_, u8> {
-        self.get_component().chunks_exact(self.meta.layout().size())
+        self.get_components().chunks_exact(self.meta.layout().size())
     }
 
     /// Returns a mutable iterator over the dense array's valid entities, one
     /// component-sized byte slice per entity.
     pub fn get_component_chunks_mut(&mut self) -> ChunksExactMut<'_, u8> {
         let size = self.meta.layout().size();
-        self.get_component_mut().chunks_exact_mut(size)
+        self.get_components_mut().chunks_exact_mut(size)
     }
 
     /// Returns a non-null pointer to the start of the dense component array, for placing
@@ -419,7 +419,7 @@ mod tests {
         set.insert(entity(1), &22u32.to_ne_bytes());
 
         let values: Vec<u32> = set
-            .get_component()
+            .get_components()
             .as_chunks::<4>()
             .0
             .iter()
@@ -434,9 +434,9 @@ mod tests {
         let mut set = sparse_set_u32(4);
         set.insert(entity(0), &11u32.to_ne_bytes());
 
-        set.get_component_mut()[0..4].copy_from_slice(&99u32.to_ne_bytes());
+        set.get_components_mut()[0..4].copy_from_slice(&99u32.to_ne_bytes());
 
-        let value = u32::from_ne_bytes(set.get_component()[0..4].try_into().unwrap());
+        let value = u32::from_ne_bytes(set.get_components()[0..4].try_into().unwrap());
         assert_eq!(value, 99);
     }
 
@@ -482,7 +482,7 @@ mod tests {
             set.get_component_mut_ptr().as_ptr().cast::<u32>().write(42);
         }
 
-        let value = u32::from_ne_bytes(set.get_component()[0..4].try_into().unwrap());
+        let value = u32::from_ne_bytes(set.get_components()[0..4].try_into().unwrap());
         assert_eq!(value, 42);
     }
 }

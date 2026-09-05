@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn mutable_lookups_resolve_registered_set() {
+    fn mutable_lookup_resolve_registered_set() {
         let mut registry = SparseSetRegistry::default();
         let type_id = TypeId::of::<u32>();
         let key = registry.register(sparse_set_u32());
