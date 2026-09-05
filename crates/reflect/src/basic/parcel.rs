@@ -6,12 +6,14 @@ use std::{
 
 use crate::{basic::meta::NeedsDrop, prelude::*};
 
+/// A parcel is a heap-allocated buffer that owns a single type erased value of any type.
 pub struct Parcel {
     meta: TypeMeta,
     data: NonNull<u8>,
 }
 
 impl Parcel {
+    /// Creates an owned parcel by a value of any type.
     pub fn new<T: Any>(value: T) -> Self {
         let meta = TypeMeta::new::<T>();
 
@@ -26,6 +28,33 @@ impl Parcel {
         // SAFETY: `buf_ptr` is aligned to `T`, and it is either sized for `T`
         // or a dangling pointer valid for a zero-sized write.
         unsafe { data.as_ptr().cast::<T>().write(value) };
+
+        Self { meta, data }
+    }
+
+    /// Creates an owned parcel by an erased value described by `meta`.
+    /// The ownership of value at `source` is then transferred to the returned parcel.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `source` is properly aligned, points
+    /// to a live value, DO NOT drop it after ownership transfer.
+    pub unsafe fn from_raw(meta: TypeMeta, source: NonNull<u8>) -> Self {
+        let layout = meta.layout();
+        let data = if layout.size() == 0 {
+            NonNull::<u8>::dangling()
+        } else {
+            // SAFETY: `layout.size() > 0`, and allocation failure aborts.
+            NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout))
+        };
+
+        if layout.size() > 0 {
+            // SAFETY: the caller guarantees that `source` points to a readable
+            // value of `layout.size()` bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(source.as_ptr(), data.as_ptr(), layout.size());
+            }
+        }
 
         Self { meta, data }
     }
@@ -226,6 +255,14 @@ mod tests {
         // must not run `Tracked`'s glue a second time.
         unsafe { parcel.take::<Tracked>() };
         assert_eq!(tracker.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn from_raw_copies_an_erased_value() {
+        let source = Parcel::new(Pos { x: 7, y: 8 });
+        let copied = unsafe { Parcel::from_raw(source.meta.clone(), source.data) };
+
+        assert_eq!(unsafe { copied.get::<Pos>() }, &Pos { x: 7, y: 8 });
     }
 
     #[test]
