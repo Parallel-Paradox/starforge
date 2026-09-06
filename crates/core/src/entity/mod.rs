@@ -9,7 +9,7 @@ pub use registry::{EntityGeneration, EntityIndex, EntityKey, EntityRegistry};
 
 use crate::prelude::Component;
 use archetype::ArchetypeKey;
-use sparse_set::{SparseIndex, SparseSetKey};
+use sparse_set::SparseSetKey;
 use starforge_reflect::basic::Parcel;
 use starforge_reflect::prelude::TypeId;
 
@@ -23,8 +23,8 @@ pub struct Entity {
     pub archetype_key: ArchetypeKey,
     /// The dense row index within the archetype's storage.
     pub archetype_row: usize,
-    /// Access [`SparseSetRegistry`] to retrieve the sparse component indices for this entity.
-    pub sparse_component: Vec<(SparseSetKey, SparseIndex)>,
+    /// Keys of the sparse sets containing components owned by this entity.
+    pub sparse_component: Vec<SparseSetKey>,
 }
 
 #[derive(Default)]

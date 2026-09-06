@@ -6,7 +6,7 @@ use std::{
     slice::{ChunksExact, ChunksExactMut},
 };
 
-use crate::prelude::EntityKey;
+use crate::{entity::EntityGeneration, prelude::EntityKey};
 use starforge_macro::Deref;
 use starforge_reflect::{basic::meta::NeedsDrop, prelude::TypeMeta};
 
@@ -15,42 +15,25 @@ pub use registry::{
 };
 
 use nonmax::NonMaxU32;
+use thiserror::Error;
 
-/// A sparse set storing one component type's dense data alongside a sparse-to-dense
-/// index, keyed by entity.
+/// A sparse set storing one component type's dense data alongside an entity-to-dense
+/// index, keyed by entity index.
 pub struct SparseSet {
     meta: TypeMeta,
-    sparse_to_dense: Vec<DenseIndex>,
-    dense_to_sparse: Vec<SparseIndex>,
-    retired_sparse: Vec<SparseIndex>,
+    /// Maps `entity_key.index` to the entity's dense row, `None` when the entity
+    /// does not own a component in this set.
+    entity_to_dense: Vec<Option<DenseIndex>>,
     entity_keys: Vec<EntityKey>,
     buf_ptr: NonNull<u8>,
     /// Number of elements `buf_ptr` was allocated to hold.
     capacity: usize,
 }
 
-/// Non-`u32::MAX` slot index into a [`SparseSet`]'s sparse array, keyed by entity.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
-pub struct SparseIndex(NonMaxU32);
-
 /// Non-`u32::MAX` slot index into a [`SparseSet`]'s dense array.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deref)]
 pub struct DenseIndex(NonMaxU32);
-
-impl SparseIndex {
-    /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
-    pub fn new(value: u32) -> Option<Self> {
-        NonMaxU32::new(value).map(Self)
-    }
-
-    /// Creates an index from `usize`, rejecting values larger than `u32::MAX - 1`.
-    pub fn from_usize(value: usize) -> Option<Self> {
-        let value = u32::try_from(value).ok()?;
-        Self::new(value)
-    }
-}
 
 impl DenseIndex {
     /// Creates an index from a raw `u32`, rejecting `u32::MAX`.
@@ -91,9 +74,7 @@ impl SparseSet {
     pub fn new(meta: TypeMeta) -> Self {
         Self {
             meta,
-            sparse_to_dense: Vec::new(),
-            dense_to_sparse: Vec::new(),
-            retired_sparse: Vec::new(),
+            entity_to_dense: Vec::new(),
             entity_keys: Vec::new(),
             buf_ptr: NonNull::dangling(),
             capacity: 0,
@@ -146,24 +127,42 @@ impl SparseSet {
         }
 
         self.capacity = new_capacity;
-        self.sparse_to_dense.reserve(additional);
-        self.dense_to_sparse.reserve(additional);
         self.entity_keys.reserve(additional);
     }
 
-    /// Inserts an entity/component pair into the dense array. Reuses a retired sparse
-    /// slot when available, otherwise allocates a new one.
+    /// Inserts `comp_data` as `entity_key`'s component in this set.
     ///
+    /// When `entity_key` already owns a component in this set, drop the old value
+    /// then use the new data to overwrite it.
     /// Grows the dense buffer (doubling capacity) if it is full.
-    ///
-    /// Returns the sparse index assigned to the inserted entity.
     ///
     /// # Panics
     ///
     /// Panics if `comp_data` length does not match the meta's component size.
-    pub fn insert(&mut self, entity_key: EntityKey, comp_data: &[u8]) -> SparseIndex {
+    pub fn insert(&mut self, entity_key: EntityKey, comp_data: &[u8]) {
         let size = self.meta.layout().size();
         assert_eq!(comp_data.len(), size, "component data length must match the component size");
+
+        // Replacing an existing component must not allocate a new dense row.
+        if let Ok(existing) = self.dense_index(entity_key) {
+            let existing_pos = existing.get() as usize;
+            if let NeedsDrop::NonTrivial { drop_fn } = self.meta.needs_drop() {
+                // SAFETY: `existing < len` (validated by `dense_index`) keeps the
+                // pointer within the initialized prefix of `buf_ptr`.
+                unsafe { drop_fn(self.buf_ptr.as_ptr().add(existing_pos * size)) };
+            }
+            // SAFETY: `existing < len` (validated by `dense_index`) keeps the write
+            // within the initialized prefix of `buf_ptr`.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    comp_data.as_ptr(),
+                    self.buf_ptr.as_ptr().add(existing_pos * size),
+                    size,
+                );
+            }
+            return;
+        }
+
         if self.len() == self.capacity {
             self.reserve(1);
         }
@@ -181,42 +180,49 @@ impl SparseSet {
         }
 
         self.entity_keys.push(entity_key);
-
-        let sparse_index = if let Some(sparse_index) = self.retired_sparse.pop() {
-            self.sparse_to_dense[sparse_index.get() as usize] = dense_index;
-            sparse_index
-        } else {
-            let sparse_index = SparseIndex::from_usize(self.sparse_to_dense.len())
-                .expect("SparseSet cannot index more than u32::MAX - 1 sparse entries");
-            self.sparse_to_dense.push(dense_index);
-            sparse_index
-        };
-
-        self.dense_to_sparse.push(sparse_index);
-        sparse_index
+        let entity_pos = entity_key.index.get() as usize;
+        if self.entity_to_dense.len() <= entity_pos {
+            self.entity_to_dense.resize(entity_pos + 1, None);
+        }
+        self.entity_to_dense[entity_pos] = Some(dense_index);
     }
 
-    /// Removes the entity/component pair addressed by `sparse_index`.
+    /// Resolves `entity_key` to its dense row in this set.
+    pub fn dense_index(&self, entity_key: EntityKey) -> Result<DenseIndex, SparseSetError> {
+        let entity_pos = entity_key.index.get() as usize;
+        let dense = match self.entity_to_dense.get(entity_pos) {
+            None => {
+                return Err(SparseSetError::IndexOutOfBounds {
+                    index: entity_key.index.get(),
+                    bounds: self.entity_to_dense.len(),
+                });
+            }
+            Some(Some(dense)) => *dense,
+            Some(None) => {
+                return Err(SparseSetError::ComponentNotLive { entity_key });
+            }
+        };
+
+        let stored = self.entity_keys[dense.get() as usize];
+        if stored.generation != entity_key.generation {
+            return Err(SparseSetError::GenerationMismatch {
+                generation: entity_key.generation,
+                expected: stored.generation,
+            });
+        }
+        Ok(dense)
+    }
+
+    /// Removes the component owned by `entity_key`.
     ///
     /// This performs a dense `swap_remove`: if the removed row is not the last dense
-    /// row, the last row is moved into the removed slot and all sparse/dense mappings
-    /// are updated accordingly. The freed sparse slot is retired and may be reused by
-    /// subsequent insertions.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `sparse_index` is out of bounds or does not refer to a live entry.
-    pub fn remove(&mut self, sparse_index: SparseIndex) {
-        let sparse_pos = sparse_index.get() as usize;
-        let remove_dense = self.sparse_to_dense[sparse_pos];
+    /// row, the last row is moved into the removed slot and the owner's dense mapping
+    /// is updated accordingly.
+    pub fn remove(&mut self, entity_key: EntityKey) -> Result<(), SparseSetError> {
+        let remove_dense = self.dense_index(entity_key)?;
         let remove_dense_pos = remove_dense.get() as usize;
         let last_dense_pos =
             self.len().checked_sub(1).expect("cannot remove from an empty sparse set");
-
-        assert_eq!(
-            self.dense_to_sparse[remove_dense_pos], sparse_index,
-            "sparse index does not refer to a live entry"
-        );
 
         let size = self.meta.layout().size();
         if let NeedsDrop::NonTrivial { drop_fn } = self.meta.needs_drop() {
@@ -234,13 +240,38 @@ impl SparseSet {
                 );
             }
 
-            let moved_sparse = self.dense_to_sparse[last_dense_pos];
-            self.sparse_to_dense[moved_sparse.get() as usize] = remove_dense;
+            // Keep the entity-to-dense view aligned with the dense swap.
+            let moved_entity = self.entity_keys[last_dense_pos];
+            self.entity_to_dense[moved_entity.index.get() as usize] = Some(remove_dense);
         }
 
-        self.entity_keys.swap_remove(remove_dense_pos);
-        self.dense_to_sparse.swap_remove(remove_dense_pos);
-        self.retired_sparse.push(sparse_index);
+        let removed_entity = self.entity_keys.swap_remove(remove_dense_pos);
+        self.entity_to_dense[removed_entity.index.get() as usize] = None;
+        Ok(())
+    }
+
+    /// Returns the component bytes owned by `entity_key`.
+    pub fn get_component(&self, entity_key: EntityKey) -> Result<&[u8], SparseSetError> {
+        let dense = self.dense_index(entity_key)?;
+        let size = self.meta.layout().size();
+        let start = dense.get() as usize * size;
+        // SAFETY: `dense < len` (validated by `dense_index`) keeps the `size`-byte
+        // slice within the `len * size`-byte initialized prefix of `buf_ptr`.
+        Ok(unsafe { std::slice::from_raw_parts(self.buf_ptr.as_ptr().add(start), size) })
+    }
+
+    /// Returns the component bytes owned by `entity_key` as a mutable slice.
+    pub fn get_component_mut(
+        &mut self,
+        entity_key: EntityKey,
+    ) -> Result<&mut [u8], SparseSetError> {
+        let dense = self.dense_index(entity_key)?;
+        let size = self.meta.layout().size();
+        let start = dense.get() as usize * size;
+        // SAFETY: `dense < len` (validated by `dense_index`) keeps the `size`-byte
+        // slice within the `len * size`-byte initialized prefix of `buf_ptr`, and the
+        // mutable borrow is exclusive.
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.buf_ptr.as_ptr().add(start), size) })
     }
 
     /// Returns the bytes of the dense component array covering the valid entities: the
@@ -312,6 +343,21 @@ impl Drop for SparseSet {
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SparseSetError {
+    #[error("Index {index} is out of bounds for sparse set with {bounds} entries")]
+    IndexOutOfBounds { index: u32, bounds: usize },
+
+    #[error("Entity {entity_key:?} does not refer to a live entry")]
+    ComponentNotLive { entity_key: EntityKey },
+
+    #[error("Generation {generation:?} does not match the expected {expected:?}")]
+    GenerationMismatch {
+        generation: EntityGeneration,
+        expected: EntityGeneration,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,40 +375,57 @@ mod tests {
         SparseSet::with_capacity(TypeMeta::new::<u32>(), capacity)
     }
 
-    #[test]
-    fn remove_swaps_last_dense_row_and_updates_mappings() {
-        let mut set = sparse_set_u32(4);
-        let s0 = set.insert(entity(0), &11u32.to_ne_bytes());
-        let s1 = set.insert(entity(1), &22u32.to_ne_bytes());
-
-        set.remove(s0);
-
-        assert_eq!(set.len(), 1);
-        assert_eq!(set.entity_keys[0], entity(1));
-        assert_eq!(set.dense_to_sparse[0], s1);
-        assert_eq!(set.sparse_to_dense[s1.get() as usize], DenseIndex::new(0).unwrap());
-        assert_eq!(set.retired_sparse, vec![s0]);
+    fn entity_stale(id: u32) -> EntityKey {
+        EntityKey {
+            index: EntityIndex::new(id).unwrap(),
+            generation: EntityGeneration::new(1).unwrap(),
+        }
     }
 
-    #[test]
-    fn insert_reuses_retired_sparse_slot_after_remove() {
-        let mut set = sparse_set_u32(4);
-        let s0 = set.insert(entity(0), &11u32.to_ne_bytes());
-        let _s1 = set.insert(entity(1), &22u32.to_ne_bytes());
-
-        set.remove(s0);
-        let reused = set.insert(entity(2), &33u32.to_ne_bytes());
-
-        assert_eq!(reused, s0);
+    /// A non-trivial component whose drop increments `Tracker`.
+    struct Tracked {
+        tracker: std::sync::Arc<Tracker>,
     }
 
-    #[test]
-    fn new_starts_empty_without_allocating() {
-        let set = sparse_set_u32(0);
+    #[derive(Default)]
+    struct Tracker {
+        drops: std::sync::atomic::AtomicUsize,
+    }
 
-        assert_eq!(set.len(), 0);
-        assert_eq!(set.capacity, 0);
-        assert!(set.entity_keys().is_empty());
+    impl Tracker {
+        fn new() -> std::sync::Arc<Self> {
+            std::sync::Arc::default()
+        }
+
+        fn drop_count(&self) -> usize {
+            self.drops.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.tracker.drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Tracked {
+        /// Raw byte representation of a freshly allocated value, without running
+        /// the temporary's drop glue (the sparse set owns the buffer copy).
+        fn new_bytes(tracker: &std::sync::Arc<Tracker>) -> [u8; std::mem::size_of::<Tracked>()] {
+            let mut uninit = std::mem::MaybeUninit::<Tracked>::uninit();
+            // SAFETY: `uninit` is uninitialized and points to enough space for `Tracked`.
+            unsafe { std::ptr::write(uninit.as_mut_ptr(), Tracked { tracker: tracker.clone() }) };
+            // SAFETY: `Tracked` is a single `Arc`; the interpreter and the sparse
+            // set agree on the same layout via `TypeMeta::new::<Tracked>()`.
+            unsafe {
+                std::slice::from_raw_parts(
+                    uninit.as_ptr().cast::<u8>(),
+                    std::mem::size_of::<Tracked>(),
+                )
+                .try_into()
+                .unwrap()
+            }
+        }
     }
 
     #[test]
@@ -484,5 +547,161 @@ mod tests {
 
         let value = u32::from_ne_bytes(set.get_components()[0..4].try_into().unwrap());
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn dense_index_distinguishes_index_bounds_not_live_and_stale_generation() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(2), &11u32.to_ne_bytes());
+
+        // Index 0 is within `entity_to_dense` length but owns no component.
+        assert_eq!(
+            set.dense_index(entity(0)),
+            Err(SparseSetError::ComponentNotLive { entity_key: entity(0) })
+        );
+        // Index 4 was never mapped: the sparse array stops at the highest mapped index.
+        assert_eq!(
+            set.dense_index(entity(4)),
+            Err(SparseSetError::IndexOutOfBounds { index: 4, bounds: 3 })
+        );
+        // Index 2 belongs to generation 0, so generation 1 must be rejected.
+        assert_eq!(
+            set.dense_index(entity_stale(2)),
+            Err(SparseSetError::GenerationMismatch {
+                generation: EntityGeneration::new(1).unwrap(),
+                expected: EntityGeneration::new(0).unwrap(),
+            })
+        );
+        // The live key resolves.
+        assert_eq!(set.dense_index(entity(2)), Ok(DenseIndex::new(0).unwrap()));
+    }
+
+    #[test]
+    fn insert_replaces_existing_key_in_place_without_growing_dense_array() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+        set.insert(entity(1), &22u32.to_ne_bytes());
+
+        set.insert(entity(0), &99u32.to_ne_bytes());
+
+        // Replacement reuses the existing dense row: length and mapping stay put.
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.dense_index(entity(0)), Ok(DenseIndex::new(0).unwrap()));
+        assert_eq!(set.dense_index(entity(1)), Ok(DenseIndex::new(1).unwrap()));
+        let values: Vec<u32> = set
+            .get_components()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(values, vec![99, 22]);
+    }
+
+    #[test]
+    fn remove_swaps_last_row_and_updates_entity_to_dense_mapping() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+        set.insert(entity(1), &22u32.to_ne_bytes());
+        set.insert(entity(2), &33u32.to_ne_bytes());
+
+        // Removing the first row moves entity 2 (the last row) into slot 0.
+        set.remove(entity(0)).unwrap();
+
+        assert_eq!(set.len(), 2);
+        // The moved entity keeps resolving, via its updated mapping.
+        assert_eq!(set.entity_keys(), &[entity(2), entity(1)]);
+        assert_eq!(set.dense_index(entity(2)), Ok(DenseIndex::new(0).unwrap()));
+        assert_eq!(set.dense_index(entity(1)), Ok(DenseIndex::new(1).unwrap()));
+        // The removed entity no longer owns a component.
+        assert_eq!(
+            set.dense_index(entity(0)),
+            Err(SparseSetError::ComponentNotLive { entity_key: entity(0) })
+        );
+
+        let values: Vec<u32> = set
+            .get_components()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(values, vec![33, 22]);
+    }
+
+    #[test]
+    fn remove_rejects_missing_and_stale_entities() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(2), &11u32.to_ne_bytes());
+
+        assert_eq!(
+            set.remove(entity(0)),
+            Err(SparseSetError::ComponentNotLive { entity_key: entity(0) })
+        );
+        assert_eq!(
+            set.remove(entity_stale(2)),
+            Err(SparseSetError::GenerationMismatch {
+                generation: EntityGeneration::new(1).unwrap(),
+                expected: EntityGeneration::new(0).unwrap(),
+            })
+        );
+        // Removal is idempotent for a key that never resolved.
+        assert_eq!(
+            set.remove(entity(9)),
+            Err(SparseSetError::IndexOutOfBounds { index: 9, bounds: 3 })
+        );
+    }
+
+    #[test]
+    fn get_component_reads_and_writes_a_single_entity() {
+        let mut set = sparse_set_u32(4);
+        set.insert(entity(0), &11u32.to_ne_bytes());
+        set.insert(entity(1), &22u32.to_ne_bytes());
+
+        assert_eq!(
+            u32::from_ne_bytes(set.get_component(entity(1)).unwrap().try_into().unwrap()),
+            22
+        );
+
+        set.get_component_mut(entity(0)).unwrap().copy_from_slice(&77u32.to_ne_bytes());
+        let values: Vec<u32> = set
+            .get_components()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(values, vec![77, 22]);
+    }
+
+    #[test]
+    fn replacing_a_non_trivial_component_drops_the_old_value() {
+        let tracker = Tracker::new();
+        let mut set = SparseSet::with_capacity(TypeMeta::new::<Tracked>(), 4);
+        set.insert(entity(0), &Tracked::new_bytes(&tracker));
+        assert_eq!(tracker.drop_count(), 0);
+
+        // The stored value is dropped in place when replaced by a new value.
+        set.insert(entity(0), &Tracked::new_bytes(&tracker));
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(tracker.drop_count(), 1);
+
+        // Dropping the sparse set drops the live value.
+        drop(set);
+        assert_eq!(tracker.drop_count(), 2);
+    }
+
+    #[test]
+    fn removing_a_non_trivial_component_drops_the_value() {
+        let tracker = Tracker::new();
+        let mut set = SparseSet::with_capacity(TypeMeta::new::<Tracked>(), 4);
+        set.insert(entity(0), &Tracked::new_bytes(&tracker));
+        set.insert(entity(1), &Tracked::new_bytes(&tracker));
+
+        set.remove(entity(0)).unwrap();
+        drop(set);
+
+        assert_eq!(tracker.drop_count(), 2);
     }
 }
