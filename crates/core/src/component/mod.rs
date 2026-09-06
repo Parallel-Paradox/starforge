@@ -1,10 +1,12 @@
 mod registry;
+mod suite;
 
 use std::any::Any;
 
 pub use registry::{
     ComponentGeneration, ComponentIndex, ComponentKey, ComponentMeta, ComponentRegistry, Error,
 };
+pub use suite::ComponentSuite;
 
 /// Marker trait for component types. Use `#[derive(Component)]` as convenience access.
 pub trait Component: Any + Send + Sync {
